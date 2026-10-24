@@ -1573,6 +1573,8 @@ bool isStreamActive (gpuStream_t s)
     return cudaStreamQuery(s) != cudaSuccess;
 #elif defined(AMREX_USE_HIP)
     return hipStreamQuery(s) != hipSuccess;
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    return ! s.queue->khr_empty();
 #elif defined(AMREX_USE_SYCL)
     return ! s.queue->ext_oneapi_empty();
 #endif
