@@ -793,7 +793,11 @@ Device::initialize_gpu (bool minimal)
             for (auto s : sgss) {
                 amrex::Print() << " " << s;
             }
+#if defined(__ACPP__)
+            amrex::Print() << " (the run-time sub-group size is used)\n"
+#else
             amrex::Print() << " (" << warp_size << " is used)\n"
+#endif
                            << "  maxMemAllocSize: " << device_prop.maxMemAllocSize << "\n"
                            << "  managedMemory: " << (device_prop.managedMemory ? "Yes" : "No") << "\n"
                            << "  concurrentManagedAccess: " << (device_prop.concurrentManagedAccess ? "Yes" : "No") << "\n"
@@ -830,8 +834,14 @@ Device::initialize_gpu (bool minimal)
             }
 #endif
         }
+#if defined(__ACPP__)
+        // AMReX's AdaptiveCpp code uses the device's run-time sub-group size
+        // (e.g. 1 on AdaptiveCpp's CPU device), not warp_size.
+        amrex::ignore_unused(sgss);
+#else
         auto found = std::ranges::find(sgss, static_cast<decltype(sgss)::value_type>(warp_size));
         if (found == sgss.end()) { amrex::Abort("Incorrect subgroup size"); }
+#endif
     }
 #endif
 

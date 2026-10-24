@@ -246,6 +246,14 @@ T PrefixSum_mp (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
 
             offset += threadIdxx;
             T x0 = (offset < Long(iend)) ? fin(N(offset)) : 0;
+#if defined(__ACPP__)
+            // Scan within the work-group; works for any sub-group size.
+            T x = sycl::inclusive_scan_over_group(gh.item->get_group(), x0, sycl::plus<T>());
+            T tmp_out = sum_prev_chunk +
+                (std::is_same_v<std::decay_t<TYPE>,Type::Inclusive> ? x : x-x0);
+            sum_prev_chunk += sycl::group_broadcast(gh.item->get_group(), x, blockDimx-1);
+            amrex::ignore_unused(sg, lane, warp, nwarps, shared, shared2);
+#else
             T x = x0;
             // Scan within a warp
             for (int i = 1; i <= Gpu::Device::warp_size; i *= 2) {
@@ -285,6 +293,7 @@ T PrefixSum_mp (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
             T tmp_out = sum_prev_warp + sum_prev_chunk +
                 (std::is_same_v<std::decay_t<TYPE>,Type::Inclusive> ? x : x-x0);
             sum_prev_chunk += shared2[nwarps-1];
+#endif
 
             if (offset < Long(iend)) {
                 blockresult_p[offset] = tmp_out;
@@ -314,6 +323,13 @@ T PrefixSum_mp (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
         T sum_prev_chunk = 0;
         for (int offset = threadIdxx; offset - threadIdxx < nblocks; offset += blockDimx) {
             T x = (offset < nblocks) ? blocksum_p[offset] : 0;
+#if defined(__ACPP__)
+            // Scan within the work-group; works for any sub-group size.
+            x = sycl::inclusive_scan_over_group(gh.item->get_group(), x, sycl::plus<T>());
+            T tmp_out = sum_prev_chunk + x;
+            sum_prev_chunk += sycl::group_broadcast(gh.item->get_group(), x, blockDimx-1);
+            amrex::ignore_unused(sg, lane, warp, nwarps, shared, shared2);
+#else
             // Scan within a warp
             for (int i = 1; i <= Gpu::Device::warp_size; i *= 2) {
                 T s = sycl::shift_group_right(sg, x, i);
@@ -351,6 +367,7 @@ T PrefixSum_mp (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
             T sum_prev_warp = (warp == 0) ? 0 : shared2[warp-1];
             T tmp_out = sum_prev_warp + sum_prev_chunk + x;
             sum_prev_chunk += shared2[nwarps-1];
+#endif
 
             if (offset < nblocks) {
                 blocksum_p[offset] = tmp_out;
@@ -464,7 +481,13 @@ T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum
         // Anywhere in this function, we should not use blockIdx.
         int virtual_block_id = 0;
         if (gridDimx > 1) {
+#if defined(__ACPP__)
+            // nwarps can be the work-group size (sub-group size 1 on the
+            // CPU device), so shared2+nwarps would be past the local memory.
+            int& virtual_block_id_shared = *((int*)(shared2));
+#else
             int& virtual_block_id_shared = *((int*)(shared2+nwarps));
+#endif
             if (threadIdxx == 0) {
                 unsigned int bid = Gpu::Atomic::Add(virtual_block_id_p, 1u);
                 virtual_block_id_shared = bid;
@@ -498,6 +521,14 @@ T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum
             if  (std::is_same_v<std::decay_t<TYPE>,Type::Exclusive> && offset == Long(n)-1) {
                 *totalsum_p += x0;
             }
+#if defined(__ACPP__)
+            // Scan within the work-group; works for any sub-group size.
+            T x = sycl::inclusive_scan_over_group(gh.item->get_group(), x0, sycl::plus<T>());
+            tmp_out[ichunk] = sum_prev_chunk +
+                (std::is_same_v<std::decay_t<TYPE>,Type::Inclusive> ? x : x-x0);
+            sum_prev_chunk += sycl::group_broadcast(gh.item->get_group(), x, blockDimx-1);
+            amrex::ignore_unused(sg, lane, warp, nwarps, shared, shared2);
+#else
             T x = x0;
             // Scan within a warp
             for (int i = 1; i <= Gpu::Device::warp_size; i *= 2) {
@@ -537,6 +568,7 @@ T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum
             tmp_out[ichunk] = sum_prev_warp + sum_prev_chunk +
                 (std::is_same_v<std::decay_t<TYPE>,Type::Inclusive> ? x : x-x0);
             sum_prev_chunk += shared2[nwarps-1];
+#endif
         }
 
         // sum_prev_chunk now holds the sum of the whole block.
@@ -559,6 +591,25 @@ T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum
             if (warp == 0) {
                 T exclusive_prefix = 0;
                 BlockStatusT volatile* pbs = block_status_p;
+#if defined(__ACPP__)
+                // Look back with the run-time sub-group size: each lane
+                // reads one predecessor; the nearest one whose value is
+                // already a full prefix ('p') ends the look-back.
+                int const sg_size = static_cast<int>(sg.get_max_local_range()[0]);
+                for (int iblock0 = virtual_block_id-1; iblock0 >= 0; iblock0 -= sg_size)
+                {
+                    int iblock = iblock0-lane;
+                    detail::STVA<T> stva{'p', 0};
+                    if (iblock >= 0) {
+                        stva = pbs[iblock].wait();
+                    }
+                    int const first_p = sycl::reduce_over_group
+                        (sg, (stva.status == 'p') ? lane : sg_size, sycl::minimum<int>());
+                    exclusive_prefix += sycl::reduce_over_group
+                        (sg, (lane <= first_p) ? stva.value : T(0), sycl::plus<T>());
+                    if (first_p < sg_size) { break; }
+                }
+#else
                 for (int iblock0 = virtual_block_id-1; iblock0 >= 0; iblock0 -= Gpu::Device::warp_size)
                 {
                     int iblock = iblock0-lane;
@@ -599,6 +650,7 @@ T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum
                     if (lane == 0) { exclusive_prefix += x; }
                     if (stop_lookback) { break; }
                 }
+#endif
 
                 if (lane == 0) {
                     block_status.write('p', block_status.get_aggregate() + exclusive_prefix);

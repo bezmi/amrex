@@ -50,6 +50,95 @@ namespace amrex::Gpu {
 
 #ifdef AMREX_USE_SYCL
 
+#if defined(__ACPP__)
+
+// AdaptiveCpp's sub-groups have one work-item on its CPU device and 32 or 64
+// on GPUs, so these reductions use SYCL group algorithms, which work for any
+// sub-group size, instead of shuffles over Gpu::Device::warp_size lanes.
+// AdaptiveCpp's generic target only accepts SYCL operation objects and scalar
+// integer or floating-point values in group algorithms.
+
+/// \cond DOXYGEN_IGNORE
+namespace detail {
+    template <typename F> struct AcppSyclOp;
+    template <typename T> struct AcppSyclOp<amrex::Plus<T>> { using type = sycl::plus<T>; };
+    template <typename T> struct AcppSyclOp<amrex::Minimum<T>> { using type = sycl::minimum<T>; };
+    template <typename T> struct AcppSyclOp<amrex::Maximum<T>> { using type = sycl::maximum<T>; };
+    template <typename T> struct AcppSyclOp<amrex::LogicalAnd<T>> { using type = sycl::logical_and<T>; };
+    template <typename T> struct AcppSyclOp<amrex::LogicalOr<T>> { using type = sycl::logical_or<T>; };
+}
+/// \endcond
+
+template <int warpSize, typename T, typename F>
+struct warpReduce
+{
+    static_assert(std::is_arithmetic_v<T>,
+                  "With AdaptiveCpp, GPU reductions need a scalar integer or floating-point type");
+    using operation_type = F;
+
+    // The result is available on every work-item of the sub-group.
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    T operator() (T x, sycl::sub_group const& sg) const noexcept
+    {
+        return sycl::reduce_over_group(sg, x, typename detail::AcppSyclOp<F>::type{});
+    }
+};
+
+// Reduction over the whole work-group; every work-item must call it. The
+// result is valid on sub-group 0. The sub-group stage is SYCL's (exact for
+// any sub-group size); the per-sub-group partials are then folded through
+// the warpSize local-memory slots the caller provides, in rounds of warpSize
+// sub-groups, so a work-group of 256 one-item sub-groups (CPU device) fits.
+// AdaptiveCpp's own work-group reduction (reduce_over_group(group)) is not
+// used: it loses the low bits of float/double results (see master.md).
+template <int warpSize, typename T, typename WARPREDUCE>
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+T blockReduce (T x, WARPREDUCE && warp_reduce, T x0, Gpu::Handler const& h)
+{
+    using F = typename std::decay_t<WARPREDUCE>::operation_type;
+    T* shared = (T*)h.local;
+    sycl::sub_group const& sg = h.item->get_sub_group();
+    int const sg_size = static_cast<int>(sg.get_max_local_range()[0]);
+    int const lane = static_cast<int>(sg.get_local_id()[0]);
+    int const wid = static_cast<int>(sg.get_group_id()[0]);
+    int const nwarps = static_cast<int>(sg.get_group_range()[0]);
+    x = warp_reduce(x, sg);
+    T acc = x0;
+    for (int r0 = 0; r0 < nwarps; r0 += warpSize) {
+        int const cnt = (nwarps - r0 < warpSize) ? (nwarps - r0) : warpSize;
+        // The leading barrier protects shared from a previous call.
+        h.syncThreads();
+        if (lane == 0 && wid >= r0 && wid < r0 + cnt) { shared[wid - r0] = x; }
+        h.syncThreads();
+        if (wid == 0) {
+            for (int i = lane; i < cnt; i += sg_size) { acc = F()(acc, shared[i]); }
+            acc = warp_reduce(acc, sg);
+        }
+    }
+    return acc;
+}
+
+// Reduction when only the first handler.numActiveThreads work-items of the
+// work-group take part: sub-groups whose work-items are all active reduce
+// together, the others update dest one work-item at a time.
+template <int warpSize, typename T, typename WARPREDUCE, typename ATOMICOP>
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+void blockReduce_partial (T* dest, T x, WARPREDUCE && warp_reduce, ATOMICOP && atomic_op,
+                          Gpu::Handler const& handler)
+{
+    sycl::sub_group const& sg = handler.item->get_sub_group();
+    int const sg_size = static_cast<int>(sg.get_max_local_range()[0]);
+    int const wid = static_cast<int>(sg.get_group_id()[0]);
+    if ((wid+1)*sg_size <= handler.numActiveThreads) {
+        x = warp_reduce(x, sg); // all work-items of this sub-group are active
+        if (sg.get_local_id()[0] == 0) { atomic_op(dest, x); }
+    } else {
+        atomic_op(dest, x);
+    }
+}
+
+#else
+
 template <int warpSize, typename T, typename F>
 struct warpReduce
 {
@@ -108,6 +197,8 @@ void blockReduce_partial (T* dest, T x, WARPREDUCE && warp_reduce, ATOMICOP && a
        atomic_op(dest, x);
    }
 }
+
+#endif
 
 // block-wide reduction for thread0
 template <typename T>
