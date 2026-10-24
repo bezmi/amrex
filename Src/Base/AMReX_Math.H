@@ -450,7 +450,12 @@ double powi (double x, int n) noexcept
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 std::uint64_t umulhi (std::uint64_t a, std::uint64_t b)
 {
-#if defined(AMREX_USE_SYCL)
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // AdaptiveCpp has no sycl::mul_hi; __int128 compiles to a 64-bit
+    // high multiply on the GPU and the CPU.
+    auto tmp = amrex::UInt128_t(a) * amrex::UInt128_t(b);
+    return std::uint64_t(tmp >> 64);
+#elif defined(AMREX_USE_SYCL)
     return sycl::mul_hi(a,b);
 #else
     AMREX_IF_ON_DEVICE(( return __umul64hi(a, b); ))

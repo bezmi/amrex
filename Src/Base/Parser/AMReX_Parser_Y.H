@@ -32,6 +32,107 @@
 #include <sycl/ext/intel/math.hpp>
 #endif
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// Device Bessel functions of integer order for AdaptiveCpp's generic target.
+// The JIT-compiled code calls the vendor library of the device it runs on.
+extern "C" double __nv_jn (int, double);
+extern "C" double __nv_yn (int, double);
+extern "C" double __ocml_j0_f64 (double);
+extern "C" double __ocml_j1_f64 (double);
+extern "C" double __ocml_y0_f64 (double);
+extern "C" double __ocml_y1_f64 (double);
+
+namespace amrex::detail {
+
+// AMD's device math library has J0, J1, Y0 and Y1 only. J_n uses forward
+// recurrence for n < |x| and Miller's backward recurrence, normalised with
+// J_0 + 2 sum_k J_2k = 1, for n >= |x|, where forward recurrence is unstable.
+// Signs follow glibc: J_{-n} = (-1)^n J_n and J_n(-x) = (-1)^n J_n(x).
+inline double acpp_amdgpu_jn (int a, double x)
+{
+    int const n = (a < 0) ? -a : a;
+    double const ax = (x < 0.0) ? -x : x;
+    double r;
+    if (n == 0) {
+        r = __ocml_j0_f64(ax);
+    } else if (n == 1) {
+        r = __ocml_j1_f64(ax);
+    } else if (ax == 0.0) {
+        r = 0.0;
+    } else if (ax > double(n)) {
+        double jm = __ocml_j0_f64(ax);
+        double j = __ocml_j1_f64(ax);
+        for (int i = 1; i < n; ++i) {
+            double const jp = (2 * i) / ax * j - jm;
+            jm = j;
+            j = jp;
+        }
+        r = j;
+    } else {
+        double const tox = 2.0 / ax;
+        int const m = 2 * ((n + static_cast<int>(std::sqrt(1600.0 * n))) / 2);
+        bool even = false;
+        double bjp = 0.0, bj = 1.0, sum = 0.0;
+        r = 0.0;
+        for (int j = m; j > 0; --j) {
+            double const bjm = j * tox * bj - bjp;
+            bjp = bj;
+            bj = bjm;
+            if (std::abs(bj) > 1.e10) { // rescale to avoid overflow
+                bj *= 1.e-10;
+                bjp *= 1.e-10;
+                r *= 1.e-10;
+                sum *= 1.e-10;
+            }
+            if (even) { sum += bj; }
+            even = !even;
+            if (j == n) { r = bjp; }
+        }
+        r /= 2.0 * sum - bj;
+    }
+    if ((n % 2 != 0) && ((x < 0.0) != (a < 0))) { r = -r; }
+    return r;
+}
+
+// Y_n by forward recurrence, which is stable for Y_n.
+// Y_{-n} = (-1)^n Y_n; Y_n(x) is NaN for x < 0.
+inline double acpp_amdgpu_yn (int a, double x)
+{
+    if (x < 0.0) { return std::numeric_limits<double>::quiet_NaN(); }
+    int const n = (a < 0) ? -a : a;
+    double r;
+    if (n == 0) {
+        r = __ocml_y0_f64(x);
+    } else {
+        double ym = __ocml_y0_f64(x);
+        double y = __ocml_y1_f64(x);
+        for (int i = 1; i < n; ++i) {
+            double const yp = (2 * i) / x * y - ym;
+            ym = y;
+            y = yp;
+        }
+        r = y;
+    }
+    if ((n % 2 != 0) && (a < 0)) { r = -r; }
+    return r;
+}
+
+template <typename F>
+double acpp_device_bessel (int a, double x, F const& host_fn, double (*nv_fn) (int, double),
+                           double (*amd_fn) (int, double))
+{
+    namespace jit = sycl::AdaptiveCpp_jit;
+    auto const be = jit::reflect<jit::reflection_query::compiler_backend>();
+    double r = std::numeric_limits<double>::quiet_NaN();
+    jit::compile_if(be == jit::compiler_backend::ptx, [&] { r = nv_fn(a, x); });
+    jit::compile_if(be == jit::compiler_backend::host, [&] { r = host_fn(a, x); });
+    jit::compile_if(be == jit::compiler_backend::amdgpu, [&] { r = amd_fn(a, x); });
+    return r;
+}
+
+}
+#endif
+
 void amrex_parsererror (char const *s, ...);
 
 namespace amrex {
@@ -489,7 +590,10 @@ template <typename T>
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 T parser_math_jn_device (int a, T b)
 {
-#if defined(AMREX_USE_SYCL) && !defined(AMREX_SYCL_EXT_INTEL_MATH)
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    return detail::acpp_device_bessel(a, b, [] (int n, double x) { return ::jn(n, x); },
+                                      __nv_jn, detail::acpp_amdgpu_jn);
+#elif defined(AMREX_USE_SYCL) && !defined(AMREX_SYCL_EXT_INTEL_MATH)
     // Unreachable: Parser::compile rejects jn for this build.
     amrex::ignore_unused(a,b);
     return 0;
@@ -528,7 +632,10 @@ template <typename T>
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 T parser_math_yn_device (int a, T b)
 {
-#if defined(AMREX_USE_SYCL) && !defined(AMREX_SYCL_EXT_INTEL_MATH)
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    return detail::acpp_device_bessel(a, b, [] (int n, double x) { return ::yn(n, x); },
+                                      __nv_yn, detail::acpp_amdgpu_yn);
+#elif defined(AMREX_USE_SYCL) && !defined(AMREX_SYCL_EXT_INTEL_MATH)
     // Unreachable: Parser::compile rejects yn for this build.
     amrex::ignore_unused(a,b);
     return 0;

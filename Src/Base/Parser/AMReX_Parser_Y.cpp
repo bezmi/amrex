@@ -2157,8 +2157,10 @@ void parser_ast_get_device_unsupported_functions (struct parser_node* node,
         break;
     case PARSER_F2:
 #if !defined(AMREX_SYCL_EXT_INTEL_MATH)
+#if !defined(__ACPP__)
         if (((struct parser_f2*)node)->ftype == PARSER_JN) { functions.insert("jn"); }
         if (((struct parser_f2*)node)->ftype == PARSER_YN) { functions.insert("yn"); }
+#endif
 #endif
         parser_ast_get_device_unsupported_functions(((struct parser_f2*)node)->l, functions);
         parser_ast_get_device_unsupported_functions(((struct parser_f2*)node)->r, functions);

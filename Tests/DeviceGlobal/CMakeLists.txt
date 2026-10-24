@@ -8,6 +8,11 @@ if (WIN32)
    return()
 endif()
 
+# AdaptiveCpp does not support device global variables.
+if (AMReX_SYCL_ACPP)
+   return()
+endif()
+
 foreach(D IN LISTS AMReX_SPACEDIM)
     set(_sources     main.cpp global_vars.cpp init.cpp work.cpp)
     set(_input_files)

@@ -525,6 +525,35 @@ Device::Initialize (bool minimal, int a_device_id)
         num_devices_used = uuid_counts.size();
         num_device_partners = uuid_counts[my_uuid];
 
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+        // AdaptiveCpp exposes no device UUID. Ranks on the same host that use
+        // a device with the same name and index are counted as sharing it.
+        // If a launcher gives each rank a different GPU (e.g. through
+        // CUDA_VISIBLE_DEVICES), they are over-counted, which only makes the
+        // initial arena sizes smaller.
+        std::string key;
+        {
+            char procname[MPI_MAX_PROCESSOR_NAME];
+            int lenname = 0;
+            BL_MPI_REQUIRE(MPI_Get_processor_name(procname, &lenname));
+            key = std::string(procname, lenname) + '|'
+                + sycl_device->get_info<sycl::info::device::name>() + '|'
+                + std::to_string(device_id);
+        }
+        constexpr int len = 512;
+        key.resize(len, '\0');
+        std::vector<char> buf(ParallelDescriptor::NProcs()*len);
+        char* pbuf = buf.data();
+        MPI_Allgather(key.data(), len, MPI_CHAR, pbuf, len, MPI_CHAR,
+                      ParallelDescriptor::Communicator());
+        std::map<std::string,int> key_counts;
+        for (int i = 0; i < ParallelDescriptor::NProcs(); ++i) {
+            ++key_counts[std::string(pbuf+i*len, len)];
+        }
+        num_devices_used = key_counts.size();
+        num_device_partners = key_counts[key];
+
 #elif defined(AMREX_USE_SYCL)
 
         auto const& d = *sycl_device;
@@ -1519,6 +1548,13 @@ Device::freeMemAvailable ()
     AMREX_HIP_OR_CUDA_OR_SYCL( AMREX_HIP_SAFE_CALL(hipMemGetInfo(&f,&t));,
                              AMREX_CUDA_SAFE_CALL(cudaMemGetInfo(&f,&t));,
                                f = device_prop.totalGlobalMem; );
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // AdaptiveCpp reports free memory for GPU devices only; the query throws
+    // for its CPU device, which keeps totalGlobalMem.
+    if (sycl_device->is_gpu()) {
+        f = sycl_device->get_info<sycl::info::device::AdaptiveCpp_free_memory>();
+    }
+#endif
 #if defined (AMREX_USE_SYCL) && defined(__INTEL_LLVM_COMPILER)
     if (sycl_device->has(sycl::aspect::ext_intel_free_memory)) {
         f = sycl_device->get_info<sycl::ext::intel::info::device::free_memory>();

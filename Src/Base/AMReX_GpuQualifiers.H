@@ -81,7 +81,12 @@
                                               AMREX_DGVARR, AMREX_DGV,\
                                               AMREX_WRONG_NUM_ARGS)(__VA_ARGS__)
 
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// AdaptiveCpp has no device_global, and its generic target gives each kernel
+// its own copy of a namespace-scope variable.
+# define AMREX_DGV(type,name) static_assert(false, "AMREX_DEVICE_GLOBAL_VARIABLE is not supported with AdaptiveCpp")
+# define AMREX_DGVARR(type,num,name) static_assert(false, "AMREX_DEVICE_GLOBAL_VARIABLE is not supported with AdaptiveCpp")
+#elif defined(AMREX_USE_SYCL)
 # define AMREX_DGV(type,name) SYCL_EXTERNAL sycl::ext::oneapi::experimental::device_global<type> name
 # define AMREX_DGVARR(type,num,name) SYCL_EXTERNAL sycl::ext::oneapi::experimental::device_global<type[num]> name
 #elif defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
