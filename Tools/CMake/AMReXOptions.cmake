@@ -159,6 +159,7 @@ else ()
 endif ()
 
 # --- SYCL ---
+set(AMReX_SYCL_ACPP OFF)
 if (AMReX_SYCL)
    set(_valid_sycl_compiler_ids Clang IntelClang IntelDPCPP IntelLLVM)
    if (NOT (CMAKE_CXX_COMPILER_ID IN_LIST _valid_sycl_compiler_ids) )
@@ -167,6 +168,16 @@ if (AMReX_SYCL)
          "set CMAKE_CXX_COMPILER=icpx.")
    endif ()
    unset(_valid_sycl_compiler_ids)
+
+   # AdaptiveCpp's acpp driver reports itself as Clang, so it is identified
+   # by name. Its builds use the generic (JIT) target and oneMath instead of
+   # Intel's oneMKL; see AMReXSYCL.cmake.
+   get_filename_component(_sycl_cxx_name ${CMAKE_CXX_COMPILER} NAME)
+   if (_sycl_cxx_name MATCHES "^(acpp|syclcc)")
+      set(AMReX_SYCL_ACPP ON)
+      message( STATUS "   SYCL compiler is AdaptiveCpp (acpp)")
+   endif ()
+   unset(_sycl_cxx_name)
 
    set(AMReX_SYCL_SUB_GROUP_SIZE_DEFAULT 32)
    set(AMReX_SYCL_SUB_GROUP_SIZE_VALUES 16 32 64)

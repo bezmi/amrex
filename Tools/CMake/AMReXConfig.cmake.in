@@ -130,6 +130,7 @@ set(AMReX_SIMD                      @AMReX_SIMD@)
 set(AMReX_OMP                       @AMReX_OMP@)
 set(AMReX_CUDA                      @AMReX_CUDA@)
 set(AMReX_SYCL                      @AMReX_SYCL@)
+set(AMReX_SYCL_ACPP                 @AMReX_SYCL_ACPP@)
 set(AMReX_HIP                       @AMReX_HIP@)
 set(AMReX_GPU_BACKEND               @AMReX_GPU_BACKEND@)
 set(AMReX_GPU_RDC                   @AMReX_GPU_RDC@)
@@ -283,6 +284,14 @@ if (@AMReX_HIP@)
     if (@AMReX_ROCTX@)
         find_dependency(rocprofiler-sdk-roctx REQUIRED CONFIG)
     endif ()
+endif ()
+
+#
+# SYCL with AdaptiveCpp
+#
+if (@AMReX_SYCL_ACPP@)
+    find_dependency(AdaptiveCpp REQUIRED)
+    find_dependency(oneMath REQUIRED)
 endif ()
 
 # CMake targets

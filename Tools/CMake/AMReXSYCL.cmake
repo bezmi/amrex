@@ -1,7 +1,7 @@
 #
 # This module defines the INTERFACE target SYCL and its alias AMReX::SYCL.
 # These targets provides build/link requirements for the SYCL language.
-# For the time being, only oneAPI is supported
+# Supported compilers: Intel oneAPI DPC++ (icpx) and AdaptiveCpp (acpp).
 #
 
 set(_cxx_sycl "$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:IntelClang>,$<CXX_COMPILER_ID:IntelDPCPP>,$<CXX_COMPILER_ID:IntelLLVM>>")
@@ -12,6 +12,39 @@ set(_cxx_sycl "$<AND:$<COMPILE_LANGUAGE:CXX>,${_cxx_sycl}>")
 #
 add_library(SYCL INTERFACE)
 add_library(AMReX::SYCL ALIAS SYCL)
+
+#
+# AdaptiveCpp (acpp driver, see AMReX_SYCL_ACPP in AMReXOptions.cmake).
+# Device code is compiled once for the generic (single-pass, JIT) target and
+# then compiled at run time for the selected device. oneMath provides the
+# oneMKL interfaces (RNG, DFT, sparse BLAS). The Intel-compiler flags below do
+# not apply.
+#
+if (AMReX_SYCL_ACPP)
+   find_package(AdaptiveCpp REQUIRED)
+   find_package(oneMath QUIET)
+   if (NOT oneMath_FOUND)
+      message(FATAL_ERROR "\nAMReX_GPU_BACKEND=SYCL with AdaptiveCpp requires oneMath, "
+         "which was not found. Set -DoneMath_ROOT=<oneMath install prefix>.\n")
+   endif ()
+   message(STATUS "Found oneMath: ${oneMath_DIR}")
+
+   target_compile_features(SYCL INTERFACE cxx_std_20)
+   # -Wno-return-type: AMREX_IF_ON_DEVICE/AMREX_IF_ON_HOST expand to two
+   # independent run-time branches in AdaptiveCpp's generic target, so a
+   # function returning from both branches looks to clang as if it can fall
+   # off its end. Other AMReX builds keep reporting missing returns.
+   target_compile_options(SYCL
+      INTERFACE
+      $<$<COMPILE_LANGUAGE:CXX>:--acpp-targets=generic -Wno-tautological-constant-compare -Wno-return-type>)
+   target_link_options(SYCL
+      INTERFACE
+      $<$<LINK_LANGUAGE:CXX>:--acpp-targets=generic>)
+   target_link_libraries(SYCL INTERFACE ONEMATH::onemath)
+
+   unset(_cxx_sycl)
+   return()
+endif ()
 
 target_compile_features(SYCL INTERFACE cxx_std_20)
 

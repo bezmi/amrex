@@ -64,6 +64,16 @@ namespace {
             }
         }
     };
+
+#if defined(__ACPP__)
+    // Platform whose devices AMReX uses with AdaptiveCpp. The device is
+    // chosen at run time with ACPP_VISIBILITY_MASK: the GPU platform if a GPU
+    // is visible, otherwise AdaptiveCpp's OpenMP CPU device.
+    sycl::platform amrex_sycl_platform ()
+    {
+        return sycl::device{sycl::default_selector_v}.get_platform();
+    }
+#endif
 }
 #endif
 
@@ -372,11 +382,19 @@ Device::Initialize (bool minimal, int a_device_id)
     int gpu_device_count = 0;
 #ifdef AMREX_USE_SYCL
     {
+#if defined(__ACPP__)
+        sycl::platform platform = amrex_sycl_platform();
+#else
         sycl::platform platform(sycl::gpu_selector_v);
+#endif
         auto const& gpu_devices = platform.get_devices();
         gpu_device_count = gpu_devices.size();
         if (gpu_device_count <= 0) {
+#if defined(__ACPP__)
+            amrex::Abort("No SYCL device found");
+#else
             amrex::Abort("No GPU device found");
+#endif
         }
     }
 #else
@@ -681,7 +699,11 @@ Device::initialize_gpu (bool minimal)
 
 #elif defined(AMREX_USE_SYCL)
     { // create device, context and queues
+#if defined(__ACPP__)
+        sycl::platform platform = amrex_sycl_platform();
+#else
         sycl::platform platform(sycl::gpu_selector_v);
+#endif
         auto const& gpu_devices = platform.get_devices();
         sycl_device = std::make_unique<sycl::device>(gpu_devices[device_id]);
 #if defined(SYCL_KHR_DEFAULT_CONTEXT)
@@ -690,9 +712,19 @@ Device::initialize_gpu (bool minimal)
         sycl_context = std::make_unique<sycl::context>(*sycl_device, amrex_sycl_error_handler);
 #endif
         for (int i = 0; i < max_gpu_streams; ++i) {
+#if defined(__ACPP__)
+            // Coarse-grained events lower AdaptiveCpp's kernel-launch latency.
+            // An event may then also wait for other work on the same queue,
+            // which is harmless for AMReX's waits on in-order queues.
+            gpu_stream_pool[i].getStream().queue = new sycl::queue(*sycl_context, *sycl_device,
+                                         amrex_sycl_error_handler,
+                                         sycl::property_list{sycl::property::queue::in_order{},
+                                                             sycl::property::queue::AdaptiveCpp_coarse_grained_events{}});
+#else
             gpu_stream_pool[i].getStream().queue = new sycl::queue(*sycl_context, *sycl_device,
                                          amrex_sycl_error_handler,
                                          sycl::property_list{sycl::property::queue::in_order{}});
+#endif
         }
     }
 
