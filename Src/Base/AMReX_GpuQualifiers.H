@@ -44,6 +44,16 @@
 #define AMREX_IMPL_ESC_(...) AMREX_IMPL_VAN_##__VA_ARGS__
 #define AMREX_IMPL_VAN_AMREX_IMPL_ISH
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// AdaptiveCpp's generic target compiles host and device code in one pass, so
+// __SYCL_DEVICE_ONLY__ is never defined. AdaptiveCpp's macros select the
+// branch when it emits host code and when it JIT-compiles device code.
+#define AMREX_IF_ON_DEVICE(CODE) \
+  __acpp_if_target_device(AMREX_IMPL_STRIP_PARENS(CODE))
+#define AMREX_IF_ON_HOST(CODE) \
+  __acpp_if_target_host(AMREX_IMPL_STRIP_PARENS(CODE))
+#endif
+
 #if !defined(AMREX_IF_ON_DEVICE) && !defined(AMREX_IF_ON_HOST)
 #if (defined(AMREX_USE_CUDA) && defined(__CUDA_ARCH__)) ||         \
     (defined(AMREX_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)) || \

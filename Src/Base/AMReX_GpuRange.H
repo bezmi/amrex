@@ -92,6 +92,13 @@ struct range_impl
     iterator begin () const noexcept {
 #if defined (__SYCL_DEVICE_ONLY__)
         return iterator(m_b, m_gid, m_grange);
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            return iterator(m_b, m_gid, m_grange);
+        ))
+        AMREX_IF_ON_HOST((
+            return iterator(m_b,0,1);
+        ))
 #else
         AMREX_IF_ON_DEVICE((
             return iterator(m_b, blockDim.x*blockIdx.x+threadIdx.x, blockDim.x*gridDim.x);

@@ -43,6 +43,26 @@ namespace detail {
             new_I = *(reinterpret_cast<Int const*>(&new_R));
         } while (! a.compare_exchange_strong(old_I, new_I));
         return *(reinterpret_cast<R const*>(&old_I));
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            static_assert(sizeof(R) == sizeof(Int), "sizeof R != sizeof Int");
+            Int* const add_as_I = reinterpret_cast<Int*>(address);
+            sycl::atomic_ref<Int,mo,ms,as> a{*add_as_I};
+            Int old_I = a.load(), new_I;
+            do {
+                R const new_R = f(*(reinterpret_cast<R const*>(&old_I)), val);
+                new_I = *(reinterpret_cast<Int const*>(&new_R));
+            } while (! a.compare_exchange_strong(old_I, new_I));
+            return *(reinterpret_cast<R const*>(&old_I));
+        ))
+        AMREX_IF_ON_HOST((
+            R old = *address;
+            *address = f(*address, val);
+            return old;
+        ))
 #else
         R old = *address;
         *address = f(*address, val);
@@ -69,6 +89,33 @@ namespace detail {
             test_success = cond(tmp);
         } while (test_success && ! a.compare_exchange_strong(old_I, new_I));
         return test_success;
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            static_assert(sizeof(R) == sizeof(Int), "sizeof R != sizeof Int");
+            Int* const add_as_I = reinterpret_cast<Int*>(address);
+            sycl::atomic_ref<Int,mo,ms,as> a{*add_as_I};
+            Int old_I = a.load(), new_I;
+            bool test_success;
+            do {
+                R const tmp = op(*(reinterpret_cast<R const*>(&old_I)), val);
+                new_I = *(reinterpret_cast<Int const*>(&tmp));
+                test_success = cond(tmp);
+            } while (test_success && ! a.compare_exchange_strong(old_I, new_I));
+            return test_success;
+        ))
+        AMREX_IF_ON_HOST((
+            R old = *address;
+            R const tmp = op(*(reinterpret_cast<R const*>(&old)), val);
+            if (cond(tmp)) {
+                *address = tmp;
+                return true;
+            } else {
+                return false;
+            }
+        ))
 #else
         R old = *address;
         R const tmp = op(*(reinterpret_cast<R const*>(&old)), val);
@@ -141,6 +188,17 @@ namespace detail {
         constexpr auto ms = sycl::memory_scope::device;
         sycl::atomic_ref<T,mo,ms,AS> a{*sum};
         return a.fetch_add(value);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            sycl::atomic_ref<T,mo,ms,AS> a{*sum};
+            return a.fetch_add(value);
+        ))
+        AMREX_IF_ON_HOST((
+            amrex::ignore_unused(sum, value);
+            return T(); // should never get here, but have to return something
+        ))
 #else
         AMREX_IF_ON_DEVICE(( return atomicAdd(sum, value); ))
         AMREX_IF_ON_HOST((
@@ -284,6 +342,9 @@ namespace detail {
     {
 #if defined(__SYCL_DEVICE_ONLY__)
         Add_device<T,AS>(sum, value);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((Add_device<T,AS>(sum, value);))
+        AMREX_IF_ON_HOST((*sum += value;))
 #else
         AMREX_IF_ON_DEVICE((Add_device(sum, value);))
         AMREX_IF_ON_HOST((*sum += value;))
@@ -318,6 +379,18 @@ namespace detail {
         constexpr auto as = sycl::access::address_space::global_space;
         sycl::atomic_ref<T,mo,ms,as> a{*m};
         return a.fetch_min(value);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<T,mo,ms,as> a{*m};
+            return a.fetch_min(value);
+        ))
+        AMREX_IF_ON_HOST((
+            amrex::ignore_unused(m,value);
+            return T(); // should never get here, but have to return something
+        ))
 #else
         AMREX_IF_ON_DEVICE(( return atomicMin(m, value); ))
         AMREX_IF_ON_HOST((
@@ -381,6 +454,18 @@ namespace detail {
         constexpr auto as = sycl::access::address_space::global_space;
         sycl::atomic_ref<T,mo,ms,as> a{*m};
         return a.fetch_max(value);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<T,mo,ms,as> a{*m};
+            return a.fetch_max(value);
+        ))
+        AMREX_IF_ON_HOST((
+            amrex::ignore_unused(m,value);
+            return T(); // should never get here, but have to return something
+        ))
 #else
         AMREX_IF_ON_DEVICE(( return atomicMax(m, value); ))
         AMREX_IF_ON_HOST((
@@ -441,6 +526,19 @@ namespace detail {
         constexpr auto as = sycl::access::address_space::global_space;
         sycl::atomic_ref<int,mo,ms,as> a{*m};
         return a.fetch_or(value);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<int,mo,ms,as> a{*m};
+            return a.fetch_or(value);
+        ))
+        AMREX_IF_ON_HOST((
+            int const old = *m;
+            *m = (*m) || value;
+            return old;
+        ))
 #else
         AMREX_IF_ON_DEVICE((
             return atomicOr(m, value);
@@ -466,6 +564,19 @@ namespace detail {
         constexpr auto as = sycl::access::address_space::global_space;
         sycl::atomic_ref<int,mo,ms,as> a{*m};
         return a.fetch_and(value ? ~0x0 : 0);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<int,mo,ms,as> a{*m};
+            return a.fetch_and(value ? ~0x0 : 0);
+        ))
+        AMREX_IF_ON_HOST((
+            int const old = *m;
+            *m = (*m) && value;
+            return old;
+        ))
 #else
         AMREX_IF_ON_DEVICE((
             return atomicAnd(m, value ? ~0x0 : 0);
@@ -492,6 +603,19 @@ namespace detail {
         constexpr auto as = sycl::access::address_space::global_space;
         sycl::atomic_ref<T,mo,ms,as> a{*address};
         return a.exchange(val);
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<T,mo,ms,as> a{*address};
+            return a.exchange(val);
+        ))
+        AMREX_IF_ON_HOST((
+            auto const old = *address;
+            *address = val;
+            return old;
+        ))
 #else
         AMREX_IF_ON_DEVICE((
             return atomicExch(address, val);
@@ -519,6 +643,20 @@ namespace detail {
         sycl::atomic_ref<T,mo,ms,as> a{*address};
         a.compare_exchange_strong(compare, val);
         return compare;
+#elif defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+            constexpr auto mo = sycl::memory_order::relaxed;
+            constexpr auto ms = sycl::memory_scope::device;
+            constexpr auto as = sycl::access::address_space::global_space;
+            sycl::atomic_ref<T,mo,ms,as> a{*address};
+            a.compare_exchange_strong(compare, val);
+            return compare;
+        ))
+        AMREX_IF_ON_HOST((
+            auto const old = *address;
+            *address = (old == compare ? val : old);
+            return old;
+        ))
 #else
         AMREX_IF_ON_DEVICE((
             return atomicCAS(address, compare, val);
