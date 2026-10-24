@@ -13,6 +13,8 @@
 #  include <cusparse.h>
 #elif defined(AMREX_USE_HIP)
 #  include <rocsparse/rocsparse.h>
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// AdaptiveCpp: AMReX_SpAcpp.H (included by AMReX_CSR.H) instead of oneMKL sparse.
 #elif defined(AMREX_USE_SYCL)
 #  include <mkl_version.h>
 #  include <oneapi/mkl/spblas.hpp>
@@ -782,6 +784,10 @@ void transpose (CsrView<T,IO> const& csrt, CsrView<T const,II> const& csr)
     Gpu::streamSynchronize();
     AMREX_ROCSPARSE_SAFE_CALL(rocsparse_destroy_handle(handle));
     The_Async_Arena()->free(pbuffer);
+
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    detail::sp_acpp::transpose(csrt, csr);
 
 #elif defined(AMREX_USE_SYCL)
 

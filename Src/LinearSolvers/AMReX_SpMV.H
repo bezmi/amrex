@@ -268,6 +268,11 @@ void SpMV (Long nrows, Long ncols, T* AMREX_RESTRICT py, CsrView<T const,Index> 
         The_Arena()->free(pbuffer);
     }
 
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    amrex::ignore_unused(ncols);
+    detail::sp_acpp::spmv<T,Index>(nrows, py, A, px);
+
 #elif defined(AMREX_USE_SYCL)
 
     mkl::sparse::matrix_handle_t handle{};

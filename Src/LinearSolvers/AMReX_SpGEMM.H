@@ -34,7 +34,7 @@ CSR<T,V,Index> spgemm_empty (Long nrows)
     return C;
 }
 
-#if !defined(AMREX_USE_GPU)
+#if !defined(AMREX_USE_GPU) || (defined(AMREX_USE_SYCL) && defined(__ACPP__))
 
 // Sorts the n entries of a row by column; `tmp` is scratch for long rows.
 template <typename T, typename Index>
@@ -571,7 +571,9 @@ CSR<T,V,Index> rap_local_cpu (Long nf, Long nc, Long ncols,
     });
 }
 
-#elif defined(AMREX_USE_CUDA)
+#endif
+
+#if defined(AMREX_USE_CUDA)
 
 inline void spgemm_cusparse_check (cusparseStatus_t status)
 {
@@ -819,6 +821,10 @@ CSR<T,V,Index> spgemm_local_rocsparse (Long nrows, Long ncols,
 
     return C;
 }
+
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+// AdaptiveCpp GPU devices: sp_acpp::spgemm (AMReX_SpAcpp.H).
 
 #elif defined(AMREX_USE_SYCL)
 
@@ -1073,6 +1079,18 @@ CSR<T,V,Index> spgemm_local (Long nrows, Long ncols,
     } catch (OutOfMemoryError const&) {
         return spgemm_local_chunked<T,V,Index>(nrows, ncols, A, B,
                                                spgemm_local_rocsparse<T,V,Index>);
+    }
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // The AdaptiveCpp CPU device multiplies with the host code (AMReX_SpAcpp.H).
+    if (sp_acpp::on_cpu_device()) {
+        Gpu::streamSynchronize();
+        return spgemm_local_cpu<T,V,Index>(nrows, ncols, A, B, row_post);
+    }
+    try {
+        return sp_acpp::spgemm<T,V,Index>(nrows, ncols, A, B);
+    } catch (OutOfMemoryError const&) {
+        return spgemm_local_chunked<T,V,Index>(nrows, ncols, A, B,
+                                               sp_acpp::spgemm<T,V,Index>);
     }
 #elif defined(AMREX_USE_SYCL)
     try {

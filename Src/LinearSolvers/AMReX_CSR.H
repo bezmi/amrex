@@ -10,7 +10,10 @@
 #include <cub/cub.cuh> // for Clang
 #endif
 
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// AdaptiveCpp builds use AMReX's own sparse kernels instead of oneMKL sparse.
+#  include <AMReX_SpAcpp.H>
+#elif defined(AMREX_USE_SYCL)
 #  include <AMReX_Reduce.H>
 #  include <mkl_version.h>
 #  include <oneapi/mkl/spblas.hpp>
@@ -157,6 +160,15 @@ void CSR<T,V,Index>::sort ()
 
     // The function is synchronous. If that is no longer the case, we might
     // need to update SpMatrix::define.
+
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // The AdaptiveCpp CPU device sorts with the host code (AMReX_SpAcpp.H).
+    if (detail::sp_acpp::on_cpu_device()) {
+        Gpu::streamSynchronize();
+        sort_on_host();
+        return;
+    }
+#endif
 
 #if defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
 
@@ -338,6 +350,11 @@ void CSR<T,V,Index>::sort ()
     // let's test both by print matrix out to see if it's sorted.
 
     AMREX_GPU_ERROR_CHECK();
+
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    // Unsorted rows longer than SHORT_ROW (AMReX_SpAcpp.H).
+    detail::sp_acpp::sort_rows(Long(nr), prow, pcol, pmat, SHORT_ROW);
 
 #elif defined(AMREX_USE_SYCL)
 
