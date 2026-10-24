@@ -84,6 +84,15 @@ namespace amrex
         // of the vendor generator is not a bound we want to depend on
         mkl::rng::device::uniform<Real> distr;
         return random_util::clamp_below_one(mkl::rng::device::generate(distr, *random_engine.engine));
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+                mkl::rng::device::uniform<Real> distr;
+                return random_util::clamp_below_one(mkl::rng::device::generate(distr, *random_engine.engine));
+        ))
+        AMREX_IF_ON_HOST((
+                amrex::ignore_unused(random_engine);
+                return Random();
+        ))
 #else
         // hiprand/curand draw from (0,1].  Relocating the single endpoint
         // that is out of range converts that to the documented [0,1) exactly,
@@ -179,6 +188,15 @@ namespace amrex
         // generator reaches its own upper bound, since 1.0 is in range here
         mkl::rng::device::uniform<Real> distr;
         return random_util::zero_to_one(mkl::rng::device::generate(distr, *random_engine.engine));
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+                mkl::rng::device::uniform<Real> distr;
+                return random_util::zero_to_one(mkl::rng::device::generate(distr, *random_engine.engine));
+        ))
+        AMREX_IF_ON_HOST((
+                amrex::ignore_unused(random_engine);
+                return RandomPositive();
+        ))
 #else
         // (0,1] is the native interval of hiprand/curand, so unlike Random()
         // this needs no endpoint relocated and no clamp: the draw is
@@ -222,6 +240,15 @@ namespace amrex
 #if defined (__SYCL_DEVICE_ONLY__)
         mkl::rng::device::gaussian<Real> distr(mean, stddev);
         return mkl::rng::device::generate(distr, *random_engine.engine);
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+                mkl::rng::device::gaussian<Real> distr(mean, stddev);
+                return mkl::rng::device::generate(distr, *random_engine.engine);
+        ))
+        AMREX_IF_ON_HOST((
+                amrex::ignore_unused(random_engine);
+                return RandomNormal(mean, stddev);
+        ))
 #else
 #ifdef BL_USE_FLOAT
         AMREX_IF_ON_DEVICE((
@@ -264,6 +291,15 @@ namespace amrex
 #if defined (__SYCL_DEVICE_ONLY__)
         mkl::rng::device::poisson<unsigned int> distr(lambda);
         return mkl::rng::device::generate(distr, *random_engine.engine);
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+                mkl::rng::device::poisson<unsigned int> distr(lambda);
+                return mkl::rng::device::generate(distr, *random_engine.engine);
+        ))
+        AMREX_IF_ON_HOST((
+                amrex::ignore_unused(random_engine);
+                return RandomPoisson(lambda);
+        ))
 #else
         AMREX_IF_ON_DEVICE((
                 AMREX_HIP_OR_CUDA(
@@ -369,6 +405,15 @@ namespace amrex
 #if defined(__SYCL_DEVICE_ONLY__)
         mkl::rng::device::uniform<unsigned int> distr(0,n);
         return mkl::rng::device::generate(distr, *random_engine.engine);
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        AMREX_IF_ON_DEVICE((
+                mkl::rng::device::uniform<unsigned int> distr(0,n);
+                return mkl::rng::device::generate(distr, *random_engine.engine);
+        ))
+        AMREX_IF_ON_HOST((
+                amrex::ignore_unused(random_engine);
+                return Random_int(n);
+        ))
 #else
         AMREX_IF_ON_DEVICE((
                 unsigned int rand;

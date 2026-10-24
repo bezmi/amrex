@@ -19,6 +19,11 @@
 
 #include <set>
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+#include <oneapi/math/rng.hpp>
+#include <new>
+#endif
+
 namespace
 {
     int nthreads;
@@ -27,7 +32,9 @@ namespace
 
 #ifdef AMREX_USE_GPU
 namespace amrex {
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    sycl_rng_engine* gpu_rand_state = nullptr;
+#elif defined(AMREX_USE_SYCL)
     sycl_rng_descr* rand_engine_descr = nullptr;
 #else
     amrex::randState_t* gpu_rand_state = nullptr;
@@ -35,7 +42,23 @@ namespace amrex {
 }
 
 namespace {
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    oneapi::math::rng::philox4x32x10* gpu_rand_generator = nullptr;
+    amrex::ULong gpu_rand_generator_seed = 0;
+
+    // The generator for FillRandom and FillRandomNormal on GPU devices. It is
+    // created on first use, not in ResizeRandomSeed, because creating it
+    // throws on a device without a oneMath host RNG backend, such as
+    // AdaptiveCpp's CPU device, where these functions fill on the host.
+    oneapi::math::rng::philox4x32x10& fill_rand_generator ()
+    {
+        if (gpu_rand_generator == nullptr) {
+            gpu_rand_generator = new oneapi::math::rng::philox4x32x10
+                (amrex::Gpu::Device::streamQueue(), gpu_rand_generator_seed);
+        }
+        return *gpu_rand_generator;
+    }
+#elif defined(AMREX_USE_SYCL)
     oneapi::mkl::rng::philox4x32x10* gpu_rand_generator = nullptr;
 #else
     amrex::randGenerator_t gpu_rand_generator = nullptr;
@@ -55,7 +78,25 @@ void ResizeRandomSeed (amrex::ULong gpu_seed)
 
     const int N = Gpu::Device::maxBlocksPerLaunch() * AMREX_GPU_MAX_THREADS;
 
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    // One engine per GPU thread, each with its own window of the
+    // philox4x32x10 stream (see the comment on the oneMKL branch below).
+    constexpr ULong elements_per_engine = ULong(1) << 36;
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE
+        (static_cast<ULong>(N) <= std::numeric_limits<ULong>::max() / elements_per_engine,
+         "ResizeRandomSeed: too many RNG engines for the per-engine offset");
+    gpu_rand_state = static_cast<sycl_rng_engine*>(The_Arena()->alloc(N*sizeof(sycl_rng_engine)));
+    sycl_rng_engine* gpu_rand_state_local = gpu_rand_state;
+    amrex::ParallelFor(N, [=] AMREX_GPU_DEVICE (int idx) noexcept
+    {
+        new (gpu_rand_state_local + idx)
+            sycl_rng_engine(gpu_seed, static_cast<ULong>(idx) * elements_per_engine);
+    });
+
+    gpu_rand_generator_seed = gpu_seed+1234ULL;
+
+#elif defined(AMREX_USE_SYCL)
 
     // oneMKL initializes engine id of an engine_descriptor as
     // Engine{seed, id*offset}.  With an offset of 1, all N engines would be
@@ -269,7 +310,17 @@ void
 DeallocateRandomSeedDevArray ()
 {
 #ifdef AMREX_USE_GPU
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    if (gpu_rand_state != nullptr) {
+        The_Arena()->free(gpu_rand_state);
+        gpu_rand_state = nullptr;
+    }
+    if (gpu_rand_generator != nullptr) {
+        delete gpu_rand_generator;
+        Gpu::streamSynchronize();
+        gpu_rand_generator = nullptr;
+    }
+#elif defined(AMREX_USE_SYCL)
     if (rand_engine_descr) {
         delete rand_engine_descr;
         Gpu::streamSynchronize();
@@ -321,6 +372,23 @@ void FillRandom (Real* p, Long N)
 #  endif
     Gpu::synchronize();
 
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    if (Gpu::Device::syclDevice().is_cpu()) {
+        // AdaptiveCpp's CPU device: device memory is host memory, so fill it
+        // as a CPU-only build does. Earlier kernels may still use p.
+        Gpu::streamSynchronize();
+        std::uniform_real_distribution<Real> distribution(Real(0.0), Real(1.0));
+        auto& gen = generators[OpenMP::get_thread_num()];
+        for (Long i = 0; i < N; ++i) {
+            p[i] = random_util::clamp_below_one(distribution(gen));
+        }
+    } else {
+        oneapi::math::rng::uniform<Real> distr;
+        auto event = oneapi::math::rng::generate(distr, fill_rand_generator(), N, p);
+        event.wait();
+    }
+
 #elif defined(AMREX_USE_SYCL)
 
     oneapi::mkl::rng::uniform<Real> distr;
@@ -368,6 +436,23 @@ void FillRandomNormal (Real* p, Long N, Real mean, Real stddev)
 #  else
     AMREX_HIPRAND_SAFE_CALL(hiprandGenerateNormalDouble(gpu_rand_generator, p, Neven, mean, stddev));
 #  endif
+
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    if (Gpu::Device::syclDevice().is_cpu()) {
+        // AdaptiveCpp's CPU device: device memory is host memory, so fill it
+        // as a CPU-only build does. Earlier kernels may still use p.
+        Gpu::streamSynchronize();
+        std::normal_distribution<Real> distribution(mean, stddev);
+        auto& gen = generators[OpenMP::get_thread_num()];
+        for (Long i = 0; i < N; ++i) {
+            p[i] = distribution(gen);
+        }
+    } else {
+        oneapi::math::rng::gaussian<Real> distr(mean, stddev);
+        auto event = oneapi::math::rng::generate(distr, fill_rand_generator(), N, p);
+        event.wait();
+    }
 
 #elif defined(AMREX_USE_SYCL)
 

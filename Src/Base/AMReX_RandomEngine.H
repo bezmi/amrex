@@ -17,6 +17,12 @@
 #elif defined(AMREX_USE_CUDA)
 #include <curand.h>
 #include <curand_kernel.h>
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+#include <sycl/sycl.hpp>
+#include <oneapi/math/rng/device.hpp>
+// AMReX's SYCL code spells the oneMKL interfaces mkl::; with AdaptiveCpp they
+// come from oneMath, which has the same interfaces in namespace oneapi::math.
+namespace mkl = oneapi::math;
 #elif defined(AMREX_USE_SYCL)
 #include <sycl/sycl.hpp>
 #include <oneapi/mkl/rng.hpp>
@@ -28,7 +34,28 @@ namespace amrex
 {
 #ifdef AMREX_USE_GPU
 
-#ifdef AMREX_USE_SYCL
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+
+    // oneMath has no engine_descriptor, so as on CUDA/HIP AMReX keeps one
+    // engine per GPU thread in device memory (see ResizeRandomSeed).
+    using sycl_rng_engine = mkl::rng::device::philox4x32x10<>;
+
+    extern sycl_rng_engine* gpu_rand_state;
+
+    inline
+    sycl_rng_engine* getRandState () {
+#ifdef AMREX_USE_OMP
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(! omp_in_parallel(), "RNG on GPU is not OpenMP thread safe");
+#endif
+        return gpu_rand_state;
+    }
+
+    struct RandomEngine {
+        sycl_rng_engine* engine;
+        AMREX_GPU_HOST_DEVICE RandomEngine (sycl_rng_engine* e) : engine(e) {}
+    };
+
+#elif defined(AMREX_USE_SYCL)
 
     using sycl_rng_engine = mkl::rng::device::philox4x32x10<>;
     using sycl_rng_descr = mkl::rng::device::engine_descriptor<sycl_rng_engine>;

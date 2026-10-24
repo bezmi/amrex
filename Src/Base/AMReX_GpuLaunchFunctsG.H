@@ -544,10 +544,16 @@ void ParallelForRNG (T n, L const& f)
     const auto nthreads_per_block = ec.numThreads.x;
     const auto nthreads_total = std::size_t(nthreads_per_block) * amrex::min(ec.numBlocks.x,Gpu::Device::maxBlocksPerLaunch());
     auto& q = Gpu::Device::streamQueue();
+#if defined(__ACPP__)
+    auto* rand_state = getRandState();
+#else
     auto& engdescr = *(getRandEngineDescriptor());
+#endif
     try {
         q.submit([&] (sycl::handler& h) {
+#if !defined(__ACPP__)
             auto engine_acc = engdescr.get_access(h);
+#endif
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
@@ -555,7 +561,11 @@ void ParallelForRNG (T n, L const& f)
             [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
             {
                 auto const tid = item.get_global_id(0);
+#if defined(__ACPP__)
+                auto engine = rand_state[tid];
+#else
                 auto engine = engine_acc.load(tid);
+#endif
                 RandomEngine rand_eng{&engine};
                 for (std::size_t i = tid, stride = item.get_global_range(0); i < std::size_t(n); i += stride) {
                     if constexpr (detail::is_big_kernel<L>()) {
@@ -564,7 +574,11 @@ void ParallelForRNG (T n, L const& f)
                         f(T(i),rand_eng);
                     }
                 }
+#if defined(__ACPP__)
+                rand_state[tid] = engine;
+#else
                 engine_acc.store(engine, tid);
+#endif
             });
         });
         q.wait_and_throw(); // because next launch might be on a different queue
@@ -587,10 +601,16 @@ void ParallelForRNG (BoxND<dim> const& box, L const& f)
     const auto nthreads_per_block = ec.numThreads.x;
     const auto nthreads_total = std::size_t(nthreads_per_block) * amrex::min(ec.numBlocks.x,Gpu::Device::maxBlocksPerLaunch());
     auto& q = Gpu::Device::streamQueue();
+#if defined(__ACPP__)
+    auto* rand_state = getRandState();
+#else
     auto& engdescr = *(getRandEngineDescriptor());
+#endif
     try {
         q.submit([&] (sycl::handler& h) {
+#if !defined(__ACPP__)
             auto engine_acc = engdescr.get_access(h);
+#endif
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
@@ -598,7 +618,11 @@ void ParallelForRNG (BoxND<dim> const& box, L const& f)
             [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
             {
                 auto const tid = item.get_global_id(0);
+#if defined(__ACPP__)
+                auto engine = rand_state[tid];
+#else
                 auto engine = engine_acc.load(tid);
+#endif
                 RandomEngine rand_eng{&engine};
                 for (std::uint64_t icell = tid, stride = item.get_global_range(0);
                      icell < indexer.numPts(); icell += stride) {
@@ -609,7 +633,11 @@ void ParallelForRNG (BoxND<dim> const& box, L const& f)
                         detail::call_f_intvect_engine(f,iv,rand_eng);
                     }
                 }
+#if defined(__ACPP__)
+                rand_state[tid] = engine;
+#else
                 engine_acc.store(engine, tid);
+#endif
             });
         });
         q.wait_and_throw(); // because next launch might be on a different queue
@@ -632,10 +660,16 @@ void ParallelForRNG (BoxND<dim> const& box, T ncomp, L const& f)
     const auto nthreads_per_block = ec.numThreads.x;
     const auto nthreads_total = std::size_t(nthreads_per_block) * amrex::min(ec.numBlocks.x,Gpu::Device::maxBlocksPerLaunch());
     auto& q = Gpu::Device::streamQueue();
+#if defined(__ACPP__)
+    auto* rand_state = getRandState();
+#else
     auto& engdescr = *(getRandEngineDescriptor());
+#endif
     try {
         q.submit([&] (sycl::handler& h) {
+#if !defined(__ACPP__)
             auto engine_acc = engdescr.get_access(h);
+#endif
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
@@ -643,7 +677,11 @@ void ParallelForRNG (BoxND<dim> const& box, T ncomp, L const& f)
             [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
             {
                 auto const tid = item.get_global_id(0);
+#if defined(__ACPP__)
+                auto engine = rand_state[tid];
+#else
                 auto engine = engine_acc.load(tid);
+#endif
                 RandomEngine rand_eng{&engine};
                 for (std::uint64_t icell = tid, stride = item.get_global_range(0);
                      icell < indexer.numPts(); icell += stride) {
@@ -654,7 +692,11 @@ void ParallelForRNG (BoxND<dim> const& box, T ncomp, L const& f)
                         detail::call_f_intvect_ncomp_engine(f,iv,ncomp,rand_eng);
                     }
                 }
+#if defined(__ACPP__)
+                rand_state[tid] = engine;
+#else
                 engine_acc.store(engine, tid);
+#endif
             });
         });
         q.wait_and_throw(); // because next launch might be on a different queue
