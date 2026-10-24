@@ -238,6 +238,10 @@ if (@AMReX_FFT@)
     if (@AMReX_GPU_BACKEND@ STREQUAL NONE)
         find_dependency(AMReXFFTW REQUIRED)
     endif()
+    # AdaptiveCpp: FFTW serves the CPU device.
+    if (@AMReX_SYCL_ACPP@)
+        find_dependency(AMReXFFTW REQUIRED)
+    endif()
 endif()
 
 if (@AMReX_HDF5@)

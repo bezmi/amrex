@@ -30,6 +30,14 @@
 #    include <rocfft.h>
 #  endif
 #  include <hip/hip_complex.h>
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+#  include <oneapi/math/dft.hpp>
+// With AdaptiveCpp the oneMKL DFT interface comes from oneMath, which has the
+// same API (the oneAPI 2025 one) in namespace oneapi::math.
+namespace oneapi { namespace mkl = ::oneapi::math; }
+// FFTW serves the AdaptiveCpp CPU device (see detail::FftwPlans).
+#  include <fftw3.h>
+#  include <cstring>
 #elif defined(AMREX_USE_SYCL)
 #  if __has_include(<oneapi/mkl/dft.hpp>) // oneAPI 2025.0
 #    include <oneapi/mkl/dft.hpp>
@@ -320,10 +328,199 @@ inline void assert_no_external_stream ()
         "SYCL FFT does not support external GPU streams.");
 }
 
+#if defined(__ACPP__)
+// oneMath has no DFT backend for AdaptiveCpp's CPU device, whose device
+// memory is host memory, so Plan<T> uses FFTW there.
+inline bool acpp_use_fftw ()
+{
+    return amrex::Gpu::Device::syclDevice().is_cpu();
+}
+
+/**
+ * FFTW plans used by Plan<T> on the AdaptiveCpp CPU device.
+ *
+ * One object holds both directions because the SYCL code shares one Plan
+ * between the forward and the backward transform. The plans run on the
+ * buffers passed at execution time (FFTW's new-array interface), which may
+ * differ from the planning buffers: LocalR2C passes the caller's arrays, and
+ * the r2r transforms use a new scratch buffer for each call. Buffers whose
+ * alignment differs from the planning buffers go through aligned temporary
+ * copies. Plans are made with FFTW_ESTIMATE, which does not touch the buffers.
+ */
+template <typename T>
+struct FftwPlans
+{
+    using plan_t = std::conditional_t<std::is_same_v<float,T>, fftwf_plan, fftw_plan>;
+    using complex_t = std::conditional_t<std::is_same_v<float,T>, fftwf_complex, fftw_complex>;
+
+    plan_t fwd = nullptr;      // r2c or forward c2c
+    plan_t bwd = nullptr;      // c2r or backward c2c; nullptr for the r2r route
+    std::size_t nreal = 0;     // real elements of one execution (0 for c2c)
+    std::size_t ncomplex = 0;  // complex elements of one execution
+    int align_r = 0;           // fftw_alignment_of the planning buffers
+    int align_c = 0;
+
+    // Plan copies share the FFTW plans; owners compare plans to destroy once.
+    bool operator== (FftwPlans const& rhs) const { return fwd == rhs.fwd && bwd == rhs.bwd; }
+
+    static int alignment_of (void* p)
+    {
+        if constexpr (std::is_same_v<float,T>) {
+            return fftwf_alignment_of(static_cast<float*>(p));
+        } else {
+            return fftw_alignment_of(static_cast<double*>(p));
+        }
+    }
+
+    // Stand-in planning buffers when the real ones are not known yet: two
+    // distinct addresses with the arena's alignment (FFTW_ESTIMATE does not
+    // access them; distinct addresses make the plan out-of-place).
+    static void* stand_in (int i)
+    {
+        alignas(256) static char buf[2][256];
+        return buf[i];
+    }
+
+    // Batched real-to-complex (fwd) and complex-to-real (bwd) plans with FFTW's
+    // basic layout, as in the CPU-only build. If pr == pc the plans are in
+    // place and only the forward plan is made (the r2r route).
+    static FftwPlans make_r2c (int rank, int const* len, int howmany,
+                               T* pr, int rdist, complex_t* pc, int cdist)
+    {
+        if (pr == nullptr) { pr = static_cast<T*>(stand_in(0)); }
+        if (pc == nullptr) { pc = static_cast<complex_t*>(stand_in(1)); }
+        bool const in_place = (static_cast<void*>(pr) == static_cast<void*>(pc));
+        FftwPlans r;
+        r.nreal = std::size_t(rdist) * howmany;
+        r.ncomplex = std::size_t(cdist) * howmany;
+        r.align_r = alignment_of(pr);
+        r.align_c = alignment_of(pc);
+        auto const flags = FFTW_ESTIMATE | FFTW_DESTROY_INPUT;
+        if constexpr (std::is_same_v<float,T>) {
+            r.fwd = fftwf_plan_many_dft_r2c(rank, len, howmany, pr, nullptr, 1, rdist,
+                                            pc, nullptr, 1, cdist, flags);
+            if (!in_place) {
+                r.bwd = fftwf_plan_many_dft_c2r(rank, len, howmany, pc, nullptr, 1, cdist,
+                                                pr, nullptr, 1, rdist, flags);
+            }
+        } else {
+            r.fwd = fftw_plan_many_dft_r2c(rank, len, howmany, pr, nullptr, 1, rdist,
+                                           pc, nullptr, 1, cdist, flags);
+            if (!in_place) {
+                r.bwd = fftw_plan_many_dft_c2r(rank, len, howmany, pc, nullptr, 1, cdist,
+                                               pr, nullptr, 1, rdist, flags);
+            }
+        }
+        return r;
+    }
+
+    // Batched in-place complex-to-complex plans, both directions.
+    static FftwPlans make_c2c (int rank, int const* len, int howmany, complex_t* p, int dist)
+    {
+        if (p == nullptr) { p = static_cast<complex_t*>(stand_in(0)); }
+        FftwPlans r;
+        r.ncomplex = std::size_t(dist) * howmany;
+        r.align_c = alignment_of(p);
+        if constexpr (std::is_same_v<float,T>) {
+            r.fwd = fftwf_plan_many_dft(rank, len, howmany, p, nullptr, 1, dist, p, nullptr, 1, dist,
+                                        FFTW_FORWARD, FFTW_ESTIMATE);
+            r.bwd = fftwf_plan_many_dft(rank, len, howmany, p, nullptr, 1, dist, p, nullptr, 1, dist,
+                                        FFTW_BACKWARD, FFTW_ESTIMATE);
+        } else {
+            r.fwd = fftw_plan_many_dft(rank, len, howmany, p, nullptr, 1, dist, p, nullptr, 1, dist,
+                                       FFTW_FORWARD, FFTW_ESTIMATE);
+            r.bwd = fftw_plan_many_dft(rank, len, howmany, p, nullptr, 1, dist, p, nullptr, 1, dist,
+                                       FFTW_BACKWARD, FFTW_ESTIMATE);
+        }
+        return r;
+    }
+
+    void destroy ()
+    {
+        for (auto* p : {&fwd, &bwd}) {
+            if (*p) {
+                if constexpr (std::is_same_v<float,T>) {
+                    fftwf_destroy_plan(*p);
+                } else {
+                    fftw_destroy_plan(*p);
+                }
+                *p = nullptr;
+            }
+        }
+    }
+
+    // Runs `run(in, out)` on the given buffers, or on aligned temporary copies
+    // if their alignment differs from the planning buffers. Kernels queued on
+    // the device may still be writing the input, so the stream is synchronized
+    // first.
+    template <typename F>
+    void execute (void* in, std::size_t in_bytes, int in_align,
+                  void* out, std::size_t out_bytes, int out_align, F const& run) const
+    {
+        Gpu::streamSynchronize();
+        if (alignment_of(in) == in_align && alignment_of(out) == out_align) {
+            run(in, out);
+            return;
+        }
+        bool const in_place = (in == out);
+        auto* tin = static_cast<char*>(The_Arena()->alloc(in_place ? std::max(in_bytes, out_bytes) : in_bytes));
+        auto* tout = in_place ? tin : static_cast<char*>(The_Arena()->alloc(out_bytes));
+        std::memcpy(tin, in, in_bytes);
+        run(tin, tout);
+        std::memcpy(out, tout, out_bytes);
+        if (!in_place) { The_Arena()->free(tout); }
+        The_Arena()->free(tin);
+    }
+
+    void execute_r2c (void* pr, void* pc) const
+    {
+        execute(pr, nreal*sizeof(T), align_r, pc, ncomplex*sizeof(complex_t), align_c,
+                [&] (void* i, void* o) {
+                    if constexpr (std::is_same_v<float,T>) {
+                        fftwf_execute_dft_r2c(fwd, static_cast<float*>(i), static_cast<complex_t*>(o));
+                    } else {
+                        fftw_execute_dft_r2c(fwd, static_cast<double*>(i), static_cast<complex_t*>(o));
+                    }
+                });
+    }
+
+    void execute_c2r (void* pc, void* pr) const
+    {
+        execute(pc, ncomplex*sizeof(complex_t), align_c, pr, nreal*sizeof(T), align_r,
+                [&] (void* i, void* o) {
+                    if constexpr (std::is_same_v<float,T>) {
+                        fftwf_execute_dft_c2r(bwd, static_cast<complex_t*>(i), static_cast<float*>(o));
+                    } else {
+                        fftw_execute_dft_c2r(bwd, static_cast<complex_t*>(i), static_cast<double*>(o));
+                    }
+                });
+    }
+
+    void execute_c2c (bool forward, void* p) const
+    {
+        plan_t pl = forward ? fwd : bwd;
+        execute(p, ncomplex*sizeof(complex_t), align_c, p, ncomplex*sizeof(complex_t), align_c,
+                [&] (void* i, void* o) {
+                    if constexpr (std::is_same_v<float,T>) {
+                        fftwf_execute_dft(pl, static_cast<complex_t*>(i), static_cast<complex_t*>(o));
+                    } else {
+                        fftw_execute_dft(pl, static_cast<complex_t*>(i), static_cast<complex_t*>(o));
+                    }
+                });
+    }
+};
+#endif
+
 template <typename T, Direction direction, typename P, typename TI, typename TO>
 void sycl_execute (P* plan, TI* in, TO* out)
 {
     assert_no_external_stream();
+#if defined(__ACPP__)
+    // oneMath uses the oneMKL specification's name for the workspace size.
+    std::int64_t workspaceSize = 0;
+    plan->get_value(oneapi::mkl::dft::config_param::WORKSPACE_EXTERNAL_BYTES,
+                    &workspaceSize);
+#else
 #ifndef AMREX_USE_MKL_DFTI_2024
     std::int64_t workspaceSize = 0;
 #else
@@ -331,9 +528,22 @@ void sycl_execute (P* plan, TI* in, TO* out)
 #endif
     plan->get_value(oneapi::mkl::dft::config_param::WORKSPACE_BYTES,
                     &workspaceSize);
+#endif
     auto* buffer = (T*)amrex::The_Arena()->alloc(workspaceSize);
     plan->set_workspace(buffer);
     sycl::event r;
+#if defined(__ACPP__)
+    // The r2r plans transform real data in place into complex output in the
+    // same buffer. oneMath accepts its two-pointer (out-of-place) overload only
+    // for NOT_INPLACE plans, so an in-place call takes the one-pointer overload.
+    if (!std::is_same_v<TI,TO> && static_cast<void*>(in) == static_cast<void*>(out)) {
+        if constexpr (direction == Direction::forward) {
+            r = oneapi::mkl::dft::compute_forward(*plan, in);
+        } else {
+            r = oneapi::mkl::dft::compute_backward(*plan, in);
+        }
+    } else
+#endif
     if (std::is_same_v<TI,TO>) {
         amrex::ignore_unused(in);
         if constexpr (direction == Direction::forward) {
@@ -366,6 +576,18 @@ struct Plan
     using VendorPlan = rocfft_plan;
     using VendorComplex = std::conditional_t<std::is_same_v<float,T>,
                                              float2, double2>;
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    using mkl_desc_r = oneapi::mkl::dft::descriptor<std::is_same_v<float,T>
+                                     ? oneapi::mkl::dft::precision::SINGLE
+                                     : oneapi::mkl::dft::precision::DOUBLE,
+                                     oneapi::mkl::dft::domain::REAL>;
+    using mkl_desc_c = oneapi::mkl::dft::descriptor<std::is_same_v<float,T>
+                                     ? oneapi::mkl::dft::precision::SINGLE
+                                     : oneapi::mkl::dft::precision::DOUBLE,
+                                     oneapi::mkl::dft::domain::COMPLEX>;
+    // oneMath descriptors on GPU devices, FFTW plans on the CPU device.
+    using VendorPlan = std::variant<mkl_desc_r*,mkl_desc_c*,detail::FftwPlans<T>>;
+    using VendorComplex = std::complex<T>;
 #elif defined(AMREX_USE_SYCL)
     using mkl_desc_r = oneapi::mkl::dft::descriptor<std::is_same_v<float,T>
                                      ? oneapi::mkl::dft::precision::SINGLE
@@ -501,6 +723,13 @@ struct Plan
 
 #elif defined(AMREX_USE_SYCL)
 
+#if defined(__ACPP__)
+        if (detail::acpp_use_fftw()) {
+            plan = detail::FftwPlans<T>::make_r2c(rank, len, howmany, pr, nr,
+                                                  reinterpret_cast<typename detail::FftwPlans<T>::complex_t*>(pc), nc);
+            return;
+        }
+#endif
         mkl_desc_r* pp;
         if (rank == 1) {
             pp = new mkl_desc_r(len[0]);
@@ -520,6 +749,14 @@ struct Plan
         strides.push_back(0);
         if (rank == 2) { strides.push_back(len[1]); }
         strides.push_back(1);
+#if defined(__ACPP__)
+        // oneMath takes strides as pointers and the workspace placement as
+        // WORKSPACE_PLACEMENT (oneMKL specification names).
+        pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides.data());
+        // Do not set BWD_STRIDES
+        pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE_PLACEMENT,
+                      oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#else
 #ifndef AMREX_USE_MKL_DFTI_2024
         pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides);
         // Do not set BWD_STRIDES
@@ -529,6 +766,7 @@ struct Plan
 #endif
         pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE,
                       oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#endif
         detail::assert_no_external_stream();
         pp->commit(amrex::Gpu::Device::streamQueue());
         plan = pp;
@@ -658,6 +896,13 @@ struct Plan
 
 #elif defined(AMREX_USE_SYCL)
 
+#if defined(__ACPP__)
+        if (detail::acpp_use_fftw()) {
+            plan = detail::FftwPlans<T>::make_c2c(ndims, len, howmany,
+                                                  reinterpret_cast<typename detail::FftwPlans<T>::complex_t*>(p), n);
+            return;
+        }
+#endif
         mkl_desc_c* pp;
         if (ndims == 1) {
             pp = new mkl_desc_c(n);
@@ -681,6 +926,13 @@ struct Plan
         for (int i = ndims-1; i >= 1; --i) {
             strides[i] = strides[i+1] * len[i];
         }
+#if defined(__ACPP__)
+        // oneMath names, as in init_r2c.
+        pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides.data());
+        pp->set_value(oneapi::mkl::dft::config_param::BWD_STRIDES, strides.data());
+        pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE_PLACEMENT,
+                      oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#else
 #ifndef AMREX_USE_MKL_DFTI_2024
         pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides);
         pp->set_value(oneapi::mkl::dft::config_param::BWD_STRIDES, strides);
@@ -690,6 +942,7 @@ struct Plan
 #endif
         pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE,
                       oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#endif
         detail::assert_no_external_stream();
         pp->commit(amrex::Gpu::Device::streamQueue());
         plan = pp;
@@ -845,6 +1098,14 @@ struct Plan
 
 #elif defined(AMREX_USE_SYCL)
 
+#if defined(__ACPP__)
+        if (detail::acpp_use_fftw()) {
+            // Planned on p (arena memory, like the scratch buffer it runs on).
+            plan = detail::FftwPlans<T>::make_r2c(1, &nex, howmany, p, nc*2,
+                                                  reinterpret_cast<typename detail::FftwPlans<T>::complex_t*>(p), nc);
+            return;
+        }
+#endif
         auto* pp = new mkl_desc_r(nex);
 #ifndef AMREX_USE_MKL_DFTI_2024
         pp->set_value(oneapi::mkl::dft::config_param::PLACEMENT,
@@ -856,6 +1117,13 @@ struct Plan
         pp->set_value(oneapi::mkl::dft::config_param::FWD_DISTANCE, nc*2);
         pp->set_value(oneapi::mkl::dft::config_param::BWD_DISTANCE, nc);
         std::vector<std::int64_t> strides = {0,1};
+#if defined(__ACPP__)
+        // oneMath names, as in init_r2c.
+        pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides.data());
+        pp->set_value(oneapi::mkl::dft::config_param::BWD_STRIDES, strides.data());
+        pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE_PLACEMENT,
+                      oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#else
 #ifndef AMREX_USE_MKL_DFTI_2024
         pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides);
         pp->set_value(oneapi::mkl::dft::config_param::BWD_STRIDES, strides);
@@ -865,6 +1133,7 @@ struct Plan
 #endif
         pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE,
                       oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#endif
         detail::assert_no_external_stream();
         pp->commit(amrex::Gpu::Device::streamQueue());
         plan = pp;
@@ -978,6 +1247,15 @@ struct Plan
 #elif defined(AMREX_USE_HIP)
         detail::hip_execute(plan, (void**)&pi, (void**)&po);
 #elif defined(AMREX_USE_SYCL)
+#if defined(__ACPP__)
+        if (auto const* fp = std::get_if<detail::FftwPlans<T>>(&plan)) {
+            if constexpr (D == Direction::forward) {
+                fp->execute_r2c(pi, po);
+            } else {
+                fp->execute_c2r(pi, po);
+            }
+        } else
+#endif
         detail::sycl_execute<T,D>(std::get<0>(plan), pi, po);
 #else
         amrex::ignore_unused(pi,po);
@@ -1020,6 +1298,11 @@ struct Plan
 #elif defined(AMREX_USE_HIP)
         detail::hip_execute(plan, (void**)&p, (void**)&p);
 #elif defined(AMREX_USE_SYCL)
+#if defined(__ACPP__)
+        if (auto const* fp = std::get_if<detail::FftwPlans<T>>(&plan)) {
+            fp->execute_c2c(D == Direction::forward, p);
+        } else
+#endif
         detail::sycl_execute<T,D>(std::get<1>(plan), p, p);
 #else
         amrex::ignore_unused(p);
@@ -1483,6 +1766,11 @@ struct Plan
 #elif defined(AMREX_USE_HIP)
         detail::hip_execute(plan, (void**)&pscratch, (void**)&pscratch);
 #elif defined(AMREX_USE_SYCL)
+#if defined(__ACPP__)
+        if (auto const* fp = std::get_if<detail::FftwPlans<T>>(&plan)) {
+            fp->execute_r2c(pscratch, pscratch);
+        } else
+#endif
         detail::sycl_execute<T,Direction::forward>(std::get<0>(plan), (T*)pscratch, (VendorComplex*)pscratch);
 #endif
 
@@ -1516,6 +1804,14 @@ struct Plan
         AMREX_CUFFT_SAFE_CALL(cufftDestroy(plan));
 #elif defined(AMREX_USE_HIP)
         AMREX_ROCFFT_SAFE_CALL(rocfft_plan_destroy(plan));
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        std::visit([](auto&& p) {
+            if constexpr (std::is_pointer_v<std::decay_t<decltype(p)>>) {
+                delete p;
+            } else {
+                p.destroy();
+            }
+        }, plan);
 #elif defined(AMREX_USE_SYCL)
         std::visit([](auto&& p) { delete p; }, plan);
 #else
@@ -1624,6 +1920,20 @@ void Plan<T>::init_r2c (IntVectND<M> const& fft_size, void* pbf, void* pbb, bool
 
 #elif defined(AMREX_USE_SYCL)
 
+#if defined(__ACPP__)
+    if (detail::acpp_use_fftw()) {
+        plan = detail::FftwPlans<T>::make_r2c(M, len, howmany, static_cast<T*>(pf), n,
+                                              static_cast<typename detail::FftwPlans<T>::complex_t*>(pb), nc);
+        if (cache) {
+            if constexpr (std::is_same_v<float,T>) {
+                detail::add_vendor_plan_f(key, plan);
+            } else {
+                detail::add_vendor_plan_d(key, plan);
+            }
+        }
+        return;
+    }
+#endif
     mkl_desc_r* pp;
     if (M == 1) {
         pp = new mkl_desc_r(fft_size[0]);
@@ -1650,6 +1960,13 @@ void Plan<T>::init_r2c (IntVectND<M> const& fft_size, void* pbf, void* pbb, bool
         strides[i] = strides[i+1] * fft_size[M-1-i];
     }
 
+#if defined(__ACPP__)
+    // oneMath names, as in init_r2c.
+    pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides.data());
+    // Do not set BWD_STRIDES
+    pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE_PLACEMENT,
+                  oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#else
 #ifndef AMREX_USE_MKL_DFTI_2024
     pp->set_value(oneapi::mkl::dft::config_param::FWD_STRIDES, strides);
     // Do not set BWD_STRIDES
@@ -1659,6 +1976,7 @@ void Plan<T>::init_r2c (IntVectND<M> const& fft_size, void* pbf, void* pbb, bool
 #endif
     pp->set_value(oneapi::mkl::dft::config_param::WORKSPACE,
                   oneapi::mkl::dft::config_value::WORKSPACE_EXTERNAL);
+#endif
     detail::assert_no_external_stream();
     pp->commit(amrex::Gpu::Device::streamQueue());
     plan = pp;

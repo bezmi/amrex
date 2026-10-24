@@ -12,6 +12,13 @@ if (AMReX_FFT)
         foreach(D IN LISTS AMReX_SPACEDIM)
             target_link_libraries(amrex_${D}d PUBLIC roc::rocfft)
         endforeach()
+    elseif (AMReX_SYCL AND AMReX_SYCL_ACPP)
+        # AdaptiveCpp: oneMath (linked with the SYCL target) serves GPU
+        # devices; FFTW serves the CPU device, where oneMath has no DFT backend.
+        find_package(AMReXFFTW REQUIRED)
+        foreach(D IN LISTS AMReX_SPACEDIM)
+            target_link_libraries(amrex_${D}d PUBLIC AMReX::FFTW)
+        endforeach()
     elseif (AMReX_SYCL)
         # nothing to do
     else()
