@@ -361,6 +361,40 @@ void ParallelFor (Gpu::KernelInfo const& info, T n, L const& f)
     auto& q = Gpu::Device::streamQueue();
     try {
         if (info.hasReduction()) {
+#if defined(__ACPP__)
+            // One element per work-item, no grid-stride loop: on AdaptiveCpp's
+            // CPU device the work-group barriers of Gpu::deviceReduce* give
+            // wrong results inside a loop whose trip count depends on the
+            // work-item (master.md open issues). More than one launch only
+            // above MT*INT_MAX elements.
+            for (auto const& nec : Gpu::makeNExecutionConfigs<MT>(Long(n))) {
+                std::size_t const start = nec.start_idx;
+                q.submit([&] (sycl::handler& h) {
+                    sycl::local_accessor<unsigned long long>
+                        shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
+                                                            MT/Gpu::Device::warp_size)), h);
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(std::size_t(nec.nblocks)*MT),
+                                                     sycl::range<1>(MT)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        std::size_t const i = start + item.get_global_id(0);
+                        if (i < std::size_t(n)) {
+                            int n_active_threads = amrex::min(std::size_t(n)-i+item.get_local_id(0),
+                                                              item.get_local_range(0));
+                            if constexpr (detail::is_big_kernel<L>()) {
+                                detail::call_f_scalar_handler(*pf, T(i),
+                                                              Gpu::Handler{&item, shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                              n_active_threads});
+                            } else {
+                                detail::call_f_scalar_handler(f, T(i),
+                                                              Gpu::Handler{&item, shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                              n_active_threads});
+                            }
+                        }
+                    });
+                });
+            }
+#else
             q.submit([&] (sycl::handler& h) {
                 sycl::local_accessor<unsigned long long>
                     shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
@@ -387,6 +421,7 @@ void ParallelFor (Gpu::KernelInfo const& info, T n, L const& f)
                     }
                 });
             });
+#endif
         } else {
             q.submit([&] (sycl::handler& h) {
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
@@ -427,6 +462,39 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
     auto& q = Gpu::Device::streamQueue();
     try {
         if (info.hasReduction()) {
+#if defined(__ACPP__)
+            // One cell per work-item, no grid-stride loop (see the 1-D version).
+            for (auto const& nec : Gpu::makeNExecutionConfigs<MT>(box.numPts())) {
+                std::uint64_t const start = nec.start_idx;
+                q.submit([&] (sycl::handler& h) {
+                    sycl::local_accessor<unsigned long long>
+                        shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
+                                                            MT/Gpu::Device::warp_size)), h);
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(std::size_t(nec.nblocks)*MT),
+                                                     sycl::range<1>(MT)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        std::uint64_t const icell = start + item.get_global_id(0);
+                        if (icell < indexer.numPts()) {
+                            auto iv = indexer.intVect(icell);
+                            int n_active_threads = amrex::min(indexer.numPts()-icell+std::uint64_t(item.get_local_id(0)),
+                                                              std::uint64_t(item.get_local_range(0)));
+                            if constexpr (detail::is_big_kernel<L>()) {
+                                detail::call_f_intvect_handler(*pf,
+                                                               iv, Gpu::Handler{&item,
+                                                                   shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                                   n_active_threads});
+                            } else {
+                                detail::call_f_intvect_handler(f,
+                                                               iv, Gpu::Handler{&item,
+                                                                   shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                                   n_active_threads});
+                            }
+                        }
+                    });
+                });
+            }
+#else
             q.submit([&] (sycl::handler& h) {
                 sycl::local_accessor<unsigned long long>
                     shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
@@ -460,9 +528,10 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
         } else {
 #if defined(__ACPP__)
             if (Gpu::Device::isCpuDevice()) {
-                // SYCL CPU device: one x-row per work-item (see the version
-                // without ncomp). The component loop is outside the row
-                // loop so that the inner loop has no nested run-time loop.
+                // SYCL CPU device: one x-row per work-item with a contiguous
+                // inner loop; the index math runs once per row, not per cell.
+                // Small work-groups (one group is run by one OpenMP thread)
+                // so that small boxes still spread over all threads.
                 std::uint64_t const len0 = box.length(0);
                 std::uint64_t const nrows = indexer.numPts() / len0;
                 constexpr std::size_t G = Gpu::Device::cpu_device_group_size;
@@ -474,15 +543,12 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
                     {
                         for (std::uint64_t row = item.get_global_id(0), stride = item.get_global_range(0);
                              row < nrows; row += stride) {
-                            auto const iv0 = indexer.intVect(row*len0);
-                            for (T n = 0; n < ncomp; ++n) {
-                                auto iv = iv0;
-                                for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
-                                    if constexpr (detail::is_big_kernel<L>()) {
-                                        detail::call_f_intvect_comp_handler(*pf,iv,n,Gpu::Handler{&item});
-                                    } else {
-                                        detail::call_f_intvect_comp_handler(f,iv,n,Gpu::Handler{&item});
-                                    }
+                            auto iv = indexer.intVect(row*len0);
+                            for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
+                                if constexpr (detail::is_big_kernel<L>()) {
+                                    detail::call_f_intvect_handler(*pf,iv,Gpu::Handler{&item});
+                                } else {
+                                    detail::call_f_intvect_handler(f,iv,Gpu::Handler{&item});
                                 }
                             }
                         }
@@ -531,6 +597,37 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
     auto& q = Gpu::Device::streamQueue();
     try {
         if (info.hasReduction()) {
+#if defined(__ACPP__)
+            // One cell per work-item, no grid-stride loop (see the 1-D version).
+            for (auto const& nec : Gpu::makeNExecutionConfigs<MT>(box.numPts())) {
+                std::uint64_t const start = nec.start_idx;
+                q.submit([&] (sycl::handler& h) {
+                    sycl::local_accessor<unsigned long long>
+                        shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
+                                                            MT/Gpu::Device::warp_size)), h);
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(std::size_t(nec.nblocks)*MT),
+                                                     sycl::range<1>(MT)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        std::uint64_t const icell = start + item.get_global_id(0);
+                        if (icell < indexer.numPts()) {
+                            auto iv = indexer.intVect(icell);
+                            int n_active_threads = amrex::min(indexer.numPts()-icell+std::uint64_t(item.get_local_id(0)),
+                                                              std::uint64_t(item.get_local_range(0)));
+                            if constexpr (detail::is_big_kernel<L>()) {
+                                detail::call_f_intvect_ncomp_handler(*pf, iv, ncomp,
+                                                                     Gpu::Handler{&item, shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                                         n_active_threads});
+                            } else {
+                                detail::call_f_intvect_ncomp_handler(f, iv, ncomp,
+                                                                     Gpu::Handler{&item, shared_data.get_multi_ptr<sycl::access::decorated::yes>().get(),
+                                                                         n_active_threads});
+                            }
+                        }
+                    });
+                });
+            }
+#else
             q.submit([&] (sycl::handler& h) {
                 sycl::local_accessor<unsigned long long>
                     shared_data(sycl::range<1>(std::max(Gpu::Device::warp_size,
@@ -562,10 +659,9 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
         } else {
 #if defined(__ACPP__)
             if (Gpu::Device::isCpuDevice()) {
-                // SYCL CPU device: one x-row per work-item with a contiguous
-                // inner loop; the index math runs once per row, not per cell.
-                // Small work-groups (one group is run by one OpenMP thread)
-                // so that small boxes still spread over all threads.
+                // SYCL CPU device: one x-row per work-item (see the version
+                // without ncomp). The component loop is outside the row
+                // loop so that the inner loop has no nested run-time loop.
                 std::uint64_t const len0 = box.length(0);
                 std::uint64_t const nrows = indexer.numPts() / len0;
                 constexpr std::size_t G = Gpu::Device::cpu_device_group_size;
@@ -577,12 +673,15 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
                     {
                         for (std::uint64_t row = item.get_global_id(0), stride = item.get_global_range(0);
                              row < nrows; row += stride) {
-                            auto iv = indexer.intVect(row*len0);
-                            for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
-                                if constexpr (detail::is_big_kernel<L>()) {
-                                    detail::call_f_intvect_handler(*pf,iv,Gpu::Handler{&item});
-                                } else {
-                                    detail::call_f_intvect_handler(f,iv,Gpu::Handler{&item});
+                            auto const iv0 = indexer.intVect(row*len0);
+                            for (T n = 0; n < ncomp; ++n) {
+                                auto iv = iv0;
+                                for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
+                                    if constexpr (detail::is_big_kernel<L>()) {
+                                        detail::call_f_intvect_comp_handler(*pf,iv,n,Gpu::Handler{&item});
+                                    } else {
+                                        detail::call_f_intvect_comp_handler(f,iv,n,Gpu::Handler{&item});
+                                    }
                                 }
                             }
                         }
