@@ -563,6 +563,19 @@ Spinning threads occupy their cores while they wait. Do not use these
 settings when the ranks times threads exceed the cores of the node or the
 node is shared, and they have no effect for one thread per rank.
 
+With one thread per rank (``OMP_NUM_THREADS=1``, or an affinity mask of one
+core), no two work-items run at the same time. AMReX detects this at
+``amrex::Initialize``, uses a single stream (overriding
+``amrex.max_gpu_streams``), and makes the ``Gpu::Atomic`` functions use
+plain loads and stores in kernels on the CPU device, as in a CPU-only
+build. In a particle-in-cell test that deposits current with
+``Gpu::Atomic::AddNoRet``, this cut the run time for 8 ranks with one
+thread each by about 40 percent. With more threads per rank the atomics are kept. The thread
+count is read once; changing it after ``amrex::Initialize`` is not
+supported. Plain operations need the program to be linked through the
+``AMReX::SYCL`` CMake target, which exports the function that kernels query;
+other programs keep the atomics.
+
 .. ===================================================================
 
 .. _sec:gpu:namespace:
