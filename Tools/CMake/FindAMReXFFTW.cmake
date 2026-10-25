@@ -142,6 +142,19 @@ function(fftw_find_precision HFFTWp)
         else()
             fftw_require_omp("${AMReX_FFTW_LIBRARY_DIRS}" "${HFFTWp}")
         endif()
+    elseif(AMReX_SYCL_ACPP)
+        # AdaptiveCpp CPU device: FFTW's parallel loops run as SYCL kernels
+        # (AMReX_FFT.cpp), which needs the threads library for the API only.
+        find_library(HAS_FFTW_THREADS_LIB${HFFTWp} fftw3${HFFTWp}_threads
+            PATHS ${AMReX_FFTW_LIBRARY_DIRS}
+            NO_DEFAULT_PATH
+        )
+        if(HAS_FFTW_THREADS_LIB${HFFTWp})
+            message(STATUS "FFTW: Found threads support")
+            target_link_libraries(AMReX::FFTW INTERFACE ${HAS_FFTW_THREADS_LIB${HFFTWp}})
+        else()
+            message(STATUS "FFTW: Could NOT find threads support, FFTW runs single-threaded")
+        endif()
     else()
         message(STATUS "FFTW: Did NOT search for OpenMP support (AMReX_OMP is not set)")
     endif()
@@ -154,6 +167,11 @@ if(NOT TARGET AMReX::FFTW)
     # floating point precision suffixes: we request float and double precision
     fftw_find_precision("")
     fftw_find_precision("f")
+
+    if(AMReX_SYCL_ACPP AND NOT AMReX_OMP AND
+       HAS_FFTW_THREADS_LIB AND HAS_FFTW_THREADS_LIBf)
+        target_compile_definitions(AMReX::FFTW INTERFACE AMREX_USE_MULTI_THREADED_FFTW=1)
+    endif()
 endif()
 
 # Vars for CMake config

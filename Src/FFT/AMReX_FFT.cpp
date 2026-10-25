@@ -4,6 +4,12 @@
 
 #include <map>
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__) && defined(AMREX_USE_MULTI_THREADED_FFTW)
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#endif
+
 /// \cond DOXYGEN_IGNORE
 namespace amrex::FFT::detail
 {
@@ -13,6 +19,49 @@ namespace
     long long s_initialized = 0;
     std::map<Key, PlanD> s_plans_d;
     std::map<Key, PlanF> s_plans_f;
+
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__) && defined(AMREX_USE_MULTI_THREADED_FFTW)
+    std::atomic<bool> s_in_sycl_parallel_loop{false};
+
+    // FFTW's parallel loops run as kernels on the AdaptiveCpp CPU device, so
+    // its worker threads do FFTW's work and FFTW starts no threads of its own.
+    // One job per work-group, so that the jobs are spread over the threads.
+    // FFTW nests loops (e.g. in batched plans). A kernel submitted from inside
+    // a running kernel would wait forever for the queue, so a nested loop, or
+    // one started while another host thread runs a loop, runs its jobs in
+    // sequence, as libfftw3_omp does with one active OpenMP level.
+    void sycl_parallel_loop (void* (*work)(char*), char* jobdata, std::size_t elsize,
+                             int njobs, void* data)
+    {
+        bool expected = false;
+        if (!s_in_sycl_parallel_loop.compare_exchange_strong(expected, true)) {
+            for (int i = 0; i < njobs; ++i) {
+                work(jobdata + i*elsize);
+            }
+            return;
+        }
+        auto& q = *static_cast<sycl::queue*>(data);
+        q.parallel_for(sycl::nd_range<1>(sycl::range<1>(njobs), sycl::range<1>(1)),
+                       [=] (sycl::nd_item<1> item)
+                       {
+                           work(jobdata + item.get_global_id(0)*elsize);
+                       }).wait();
+        s_in_sycl_parallel_loop = false;
+    }
+
+    // Number of threads of the CPU device's OpenMP runtime: the first value
+    // of OMP_NUM_THREADS, else the number of compute units.
+    int acpp_cpu_threads ()
+    {
+        char const* env = std::getenv("OMP_NUM_THREADS");
+        int n = env ? std::atoi(env) : 0;
+        if (n < 1) {
+            n = static_cast<int>(Gpu::Device::syclDevice()
+                                 .get_info<sycl::info::device::max_compute_units>());
+        }
+        return std::max(n, 1);
+    }
+#endif
 }
 
 void Initialize ()
@@ -21,6 +70,16 @@ void Initialize ()
     {
 #if defined(AMREX_USE_HIP) && defined(AMREX_USE_FFT)
         AMREX_ROCFFT_SAFE_CALL(rocfft_setup());
+#elif defined(AMREX_USE_SYCL) && defined(__ACPP__) && defined(AMREX_USE_MULTI_THREADED_FFTW)
+        if (Gpu::Device::syclDevice().is_cpu()) {
+            int const nthreads = acpp_cpu_threads();
+            fftw_init_threads();
+            fftwf_init_threads();
+            fftw_plan_with_nthreads(nthreads);
+            fftwf_plan_with_nthreads(nthreads);
+            fftw_threads_set_callback(sycl_parallel_loop, &Gpu::Device::streamQueue());
+            fftwf_threads_set_callback(sycl_parallel_loop, &Gpu::Device::streamQueue());
+        }
 #elif !defined(AMREX_USE_GPU) && defined(AMREX_USE_MULTI_THREADED_FFTW)
         fftw_init_threads();
         fftwf_init_threads();
