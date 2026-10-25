@@ -192,6 +192,89 @@ struct BlockStatus<T, false>
 
 #if defined(AMREX_USE_SYCL)
 
+#if defined(__ACPP__)
+// Scan for AdaptiveCpp's CPU device (OpenMP host device). Its JIT compiler
+// miscompiles a work-group barrier inside a loop whose trip count is not
+// known at compile time (reproducer in the project notes), which is the
+// shape of PrefixSum_mp and of the single-pass PrefixSum. This version has
+// no barrier: work-items are whole blocks of elements scanned serially,
+// the block sums are scanned by one work-item, then every block adds its
+// offset. Three passes over memory, like PrefixSum_mp. Remove when the
+// compiler is fixed.
+template <typename T, std::integral N, typename FIN, typename FOUT, typename TYPE>
+T PrefixSum_cpudev (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
+{
+    if (n <= 0) { return 0; }
+    constexpr Long nelms_per_block = 2048;
+    AMREX_ALWAYS_ASSERT(static_cast<Long>(n) < static_cast<Long>(
+                        std::numeric_limits<int>::max())*nelms_per_block);
+    int const nblocks = static_cast<int>((static_cast<Long>(n) + nelms_per_block - 1) / nelms_per_block);
+
+    std::size_t nbytes_blockresult = Arena::align(sizeof(T)*n);
+    std::size_t nbytes_blocksum = Arena::align(sizeof(T)*nblocks);
+    std::size_t nbytes_totalsum = Arena::align(sizeof(T));
+    auto dp = (char*)(The_Arena()->alloc(nbytes_blockresult
+                                         + nbytes_blocksum
+                                         + nbytes_totalsum));
+    T* blockresult_p = (T*)dp;
+    T* blocksum_p = (T*)(dp + nbytes_blockresult);
+    T* totalsum_p = (T*)(dp + nbytes_blockresult + nbytes_blocksum);
+
+    // 1. Each work-item scans one block of nelms_per_block elements.
+    amrex::ParallelFor(nblocks, [=] AMREX_GPU_DEVICE (int b) noexcept
+    {
+        Long const ibegin = Long(b)*nelms_per_block;
+        Long const iend = amrex::min(ibegin+nelms_per_block, Long(n));
+        T s = 0;
+        for (Long i = ibegin; i < iend; ++i) {
+            T x = fin(N(i));
+            if constexpr (std::is_same_v<std::decay_t<TYPE>,Type::Inclusive>) {
+                s += x;
+                blockresult_p[i] = s;
+            } else {
+                blockresult_p[i] = s;
+                s += x;
+            }
+        }
+        blocksum_p[b] = s;
+    });
+
+    // 2. Exclusive scan of the block sums by one work-item (n/2048 values).
+    amrex::ParallelFor(1, [=] AMREX_GPU_DEVICE (int) noexcept
+    {
+        T s = 0;
+        for (int b = 0; b < nblocks; ++b) {
+            T t = blocksum_p[b];
+            blocksum_p[b] = s;
+            s += t;
+        }
+        *totalsum_p = s;
+    });
+
+    // 3. Each work-item adds its block's offset and hands the values out.
+    amrex::ParallelFor(nblocks, [=] AMREX_GPU_DEVICE (int b) noexcept
+    {
+        Long const ibegin = Long(b)*nelms_per_block;
+        Long const iend = amrex::min(ibegin+nelms_per_block, Long(n));
+        T const prev = blocksum_p[b];
+        for (Long i = ibegin; i < iend; ++i) {
+            fout(N(i), prev + blockresult_p[i]);
+        }
+    });
+
+    T totalsum = 0;
+    if (a_ret_sum) {
+        Gpu::dtoh_memcpy_async(&totalsum, totalsum_p, sizeof(T));
+        Gpu::streamSynchronize();
+        The_Arena()->free(dp);
+        AMREX_GPU_ERROR_CHECK();
+    } else {
+        Gpu::freeAsync(The_Arena(), dp);
+    }
+    return totalsum;
+}
+#endif
+
 #ifndef AMREX_SYCL_NO_MULTIPASS_SCAN
 template <typename T, std::integral N, typename FIN, typename FOUT, typename TYPE>
 T PrefixSum_mp (N n, FIN const& fin, FOUT const& fout, TYPE, RetSum a_ret_sum)
@@ -420,6 +503,11 @@ requires (std::same_as<std::decay_t<TYPE>,Type::Inclusive> ||
 T PrefixSum (N n, FIN && fin, FOUT && fout, TYPE type, RetSum a_ret_sum = retSum)
 {
     if (n <= 0) { return 0; }
+#if defined(__ACPP__)
+    if (Gpu::Device::isCpuDevice()) {
+        return PrefixSum_cpudev<T>(n, std::forward<FIN>(fin), std::forward<FOUT>(fout), type, a_ret_sum);
+    }
+#endif
     constexpr int nwarps_per_block = 8;
     constexpr int nthreads = nwarps_per_block*Gpu::Device::warp_size;
     constexpr int nchunks = 12;
