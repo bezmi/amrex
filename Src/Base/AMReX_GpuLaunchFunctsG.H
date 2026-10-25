@@ -188,7 +188,7 @@ void launch (int nblocks, int nthreads_per_block, std::size_t shared_mem_bytes,
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 if constexpr (detail::is_big_kernel<L>()) {
                     (*pf)(Gpu::Handler{&item,shared_data.get_multi_ptr<sycl::access::decorated::yes>().get()});
@@ -216,7 +216,7 @@ void launch (int nblocks, int nthreads_per_block, gpuStream_t stream, L const& f
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 if constexpr (detail::is_big_kernel<L>()) {
                     (*pf)(item);
@@ -249,8 +249,8 @@ void launch (int nblocks, std::size_t shared_mem_bytes, gpuStream_t stream,
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(MT)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 if constexpr (detail::is_big_kernel<L>()) {
                     (*pf)(Gpu::Handler{&item,shared_data.get_multi_ptr<sycl::access::decorated::yes>().get()});
@@ -278,8 +278,8 @@ void launch (int nblocks, gpuStream_t stream, L const& f)
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(MT)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 if constexpr (detail::is_big_kernel<L>()) {
                     (*pf)(item);
@@ -311,8 +311,8 @@ void launch (T const& n, L const& f)
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 for (auto const i : Gpu::Range(n,item.get_global_id(0),item.get_global_range(0))) {
                     if constexpr (detail::is_big_kernel<L>()) {
@@ -350,8 +350,8 @@ void ParallelFor (Gpu::KernelInfo const& info, T n, L const& f)
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::size_t i = item.get_global_id(0), stride = item.get_global_range(0);
                          i < std::size_t(n); i += stride) {
@@ -374,8 +374,8 @@ void ParallelFor (Gpu::KernelInfo const& info, T n, L const& f)
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::size_t i = item.get_global_id(0), stride = item.get_global_range(0);
                          i < std::size_t(n); i += stride) {
@@ -416,8 +416,8 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
                          icell < indexer.numPts(); icell += stride) {
@@ -443,8 +443,8 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
                          icell < indexer.numPts(); icell += stride) {
@@ -486,8 +486,8 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
                          icell < indexer.numPts(); icell += stride) {
@@ -511,8 +511,8 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
                 [=] (sycl::nd_item<1> item)
-                [[sycl::reqd_work_group_size(MT)]]
-                [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+                AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+                AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
                 {
                     for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
                          icell < indexer.numPts(); icell += stride) {
@@ -557,8 +557,8 @@ void ParallelForRNG (T n, L const& f)
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(AMREX_GPU_MAX_THREADS)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(AMREX_GPU_MAX_THREADS)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const tid = item.get_global_id(0);
 #if defined(__ACPP__)
@@ -614,8 +614,8 @@ void ParallelForRNG (BoxND<dim> const& box, L const& f)
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(AMREX_GPU_MAX_THREADS)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(AMREX_GPU_MAX_THREADS)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const tid = item.get_global_id(0);
 #if defined(__ACPP__)
@@ -673,8 +673,8 @@ void ParallelForRNG (BoxND<dim> const& box, T ncomp, L const& f)
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(AMREX_GPU_MAX_THREADS)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(AMREX_GPU_MAX_THREADS)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const tid = item.get_global_id(0);
 #if defined(__ACPP__)
@@ -726,8 +726,8 @@ void ParallelFor (Gpu::KernelInfo const& /*info*/, BoxND<dim> const& box1, BoxND
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const ncells = std::max(indexer1.numPts(), indexer2.numPts());
                 for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
@@ -781,8 +781,8 @@ void ParallelFor (Gpu::KernelInfo const& /*info*/,
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const ncells = amrex::max(indexer1.numPts(), indexer2.numPts(), indexer3.numPts());
                 for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
@@ -842,8 +842,8 @@ void ParallelFor (Gpu::KernelInfo const& /*info*/,
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const ncells = std::max(indexer1.numPts(), indexer2.numPts());
                 for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);
@@ -898,8 +898,8 @@ void ParallelFor (Gpu::KernelInfo const& /*info*/,
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),
             [=] (sycl::nd_item<1> item)
-            [[sycl::reqd_work_group_size(MT)]]
-            [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+            AMREX_SYCL_REQD_WORK_GROUP_SIZE(MT)
+            AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
             {
                 auto const ncells = amrex::max(indexer1.numPts(), indexer2.numPts(), indexer3.numPts());
                 for (std::uint64_t icell = item.get_global_id(0), stride = item.get_global_range(0);

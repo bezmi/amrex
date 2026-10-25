@@ -315,7 +315,7 @@ void deterministic_fab_to_fab (Vector<Array4CopyTag<T0,T1>> const& a_tags, int s
     amrex::launch<nthreads>(nblocks, Gpu::gpuStream(),
 #ifdef AMREX_USE_SYCL
         [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
-        [[sycl::reqd_work_group_size(nthreads)]]
+        AMREX_SYCL_REQD_WORK_GROUP_SIZE(nthreads)
 #else
         [=] AMREX_GPU_DEVICE () noexcept
 #endif

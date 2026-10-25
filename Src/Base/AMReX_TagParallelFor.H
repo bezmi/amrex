@@ -350,8 +350,8 @@ ParallelFor_doit (TagVector<TagType> const& tv, F const& f)
     amrex::launch<nthreads>(tv.nblocks, Gpu::gpuStream(),
 #ifdef AMREX_USE_SYCL
     [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
-    [[sycl::reqd_work_group_size(nthreads)]]
-    [[sycl::reqd_sub_group_size(Gpu::Device::warp_size)]]
+    AMREX_SYCL_REQD_WORK_GROUP_SIZE(nthreads)
+    AMREX_SYCL_REQD_SUB_GROUP_SIZE(Gpu::Device::warp_size)
 #else
     [=] AMREX_GPU_DEVICE () noexcept
 #endif

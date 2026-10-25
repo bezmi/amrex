@@ -74,6 +74,16 @@
 # include <sycl/sycl.hpp>
 #endif
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// AdaptiveCpp ignores these attributes: it specializes each kernel for its
+// launched work-group size, and the device picks the sub-group size.
+# define AMREX_SYCL_REQD_WORK_GROUP_SIZE(n)
+# define AMREX_SYCL_REQD_SUB_GROUP_SIZE(n)
+#elif defined(AMREX_USE_SYCL)
+# define AMREX_SYCL_REQD_WORK_GROUP_SIZE(n) [[sycl::reqd_work_group_size(n)]]
+# define AMREX_SYCL_REQD_SUB_GROUP_SIZE(n) [[sycl::reqd_sub_group_size(n)]]
+#endif
+
 #define AMREX_WRONG_NUM_ARGS(...) static_assert(false,"Wrong number of arguments to macro")
 
 #define AMREX_GET_DGV_MACRO(_1,_2,_3,NAME,...) NAME
