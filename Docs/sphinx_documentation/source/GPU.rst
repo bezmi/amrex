@@ -535,6 +535,33 @@ Below is an example configuration for SYCL:
    \end{center}
 
 
+Running on the AdaptiveCpp CPU device
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+With AdaptiveCpp (``acpp``) as the SYCL compiler, the same executable can
+run its kernels on a GPU or on the host CPUs. The device is chosen at run
+time with ``ACPP_VISIBILITY_MASK``: ``ACPP_VISIBILITY_MASK=omp`` selects
+the OpenMP host device, ``ACPP_VISIBILITY_MASK=cuda`` an NVIDIA GPU. On the
+CPU device every kernel is spread over ``OMP_NUM_THREADS`` threads, so a
+code written with ``ParallelFor`` runs in parallel on the CPU even where it
+has no OpenMP directives of its own. The usual layouts are one MPI rank
+with several threads, or one rank per core with one thread.
+
+The first run of a new executable compiles its kernels just in time and
+stores them in the kernel cache under ``~/.acpp``; AdaptiveCpp prints a
+warning when that happens. Time only runs that print no such warning.
+
+For one rank with several threads, the OpenMP threads sleep between kernel
+launches by default. Letting them spin and pinning them to cores removed
+10 to 30 percent of the run time of a compressible Navier-Stokes test on
+an 8-core workstation and made it match or beat a native OpenMP build::
+
+   OMP_NUM_THREADS=8 OMP_WAIT_POLICY=active OMP_PLACES=cores OMP_PROC_BIND=close \
+   ACPP_VISIBILITY_MASK=omp mpirun -np 1 ./main3d.ex inputs
+
+Spinning threads occupy their cores while they wait. Do not use these
+settings when the ranks times threads exceed the cores of the node or the
+node is shared, and they have no effect for one thread per rank.
 
 .. ===================================================================
 
