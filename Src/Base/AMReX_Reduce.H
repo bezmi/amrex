@@ -10,6 +10,9 @@
 #include <AMReX_MFIter.H>
 #include <AMReX_TypeList.H>
 #include <AMReX_ValLocPair.H>
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+#include <AMReX_MFParallelForG.H>
+#endif
 
 #include <algorithm>
 #include <concepts>
@@ -615,6 +618,45 @@ public:
 
 /// \cond DOXYGEN_IGNORE
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // SYCL CPU device form of eval_mf, eval_box and eval(n): work-item tid
+    // accumulates units tid, tid+nitems, ... (unit_f(unit, r) adds one unit
+    // into r) into its own result slot, with no work-group reduction; on
+    // this device the barriers of that reduction cost more than the loop.
+    // Slots below the stream's previous block count hold earlier results and
+    // are combined, the others are set; value() folds the slots as usual.
+    template <typename D, typename U>
+    void eval_cpu_units (D& reduce_data, Long nunits, U const& unit_f)
+    {
+        using ReduceTuple = typename D::Type;
+        if (nunits <= 0) { return; }
+        auto const& stream = Gpu::gpuStream();
+        auto pdst = reduce_data.devicePtr(stream);
+        const int nitems = int(std::min<Long>(nunits, reduce_data.maxBlocks()));
+        int& nblocks_ref = reduce_data.nBlocks(stream);
+        const int old_nblocks = nblocks_ref;
+        nblocks_ref = amrex::max(nblocks_ref, nitems);
+        reduce_data.updateMaxStreamIndex(stream);
+        constexpr int G = Gpu::Device::cpu_device_group_size;
+        amrex::launch<G>((nitems+G-1)/G, stream,
+        [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+        {
+            const int tid = int(item.get_global_id(0));
+            if (tid >= nitems) { return; }
+            ReduceTuple r;
+            Reduce::detail::for_each_init<0, ReduceTuple, Ps...>(r);
+            for (Long unit = tid; unit < nunits; unit += nitems) {
+                unit_f(unit, r);
+            }
+            if (tid >= old_nblocks) {
+                pdst[tid] = r;
+            } else {
+                Reduce::detail::for_each_local<0, ReduceTuple, Ps...>(pdst[tid], r);
+            }
+        });
+    }
+#endif
+
     // This is public for CUDA
     template <typename Tag, typename MF, typename D, typename F>
     void eval_mf (Tag, MF const& mf, IntVect const& nghost, int ncomp, D& reduce_data, F const& f)
@@ -623,6 +665,30 @@ public:
         const int nboxes = mf.local_size();
         if (nboxes > 0) {
             auto const& parforinfo = mf.getParForInfo(nghost);
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+            if (Gpu::Device::isCpuDevice()) {
+                // One unit = one x-row of one box, as in ParallelFor_doit.
+                const int nrows_per_box = parforinfo.getNRowsPerBox();
+                const BoxIndexer* dp_boxes = parforinfo.getBoxes();
+                eval_cpu_units(reduce_data, Long(nrows_per_box)*Long(nboxes),
+                [=] AMREX_GPU_DEVICE (Long unit, ReduceTuple& r) noexcept
+                {
+                    const int ibox = int(unit / nrows_per_box);
+                    const int row = int(unit - Long(ibox)*nrows_per_box);
+                    BoxIndexer const indexer = dp_boxes[ibox];
+                    const int lenx = amrex::detail::box_indexer_len_x(indexer);
+                    const auto icell0 = std::uint64_t(row)*std::uint64_t(lenx);
+                    if (icell0 < indexer.numPts()) {
+                        auto [i0, j, k] = indexer(icell0);
+                        for (int i = i0; i < i0+lenx; ++i) {
+                            Reduce::detail::mf_call_f<Tag, F, ReduceTuple, Ps...>
+                                (f, ibox, i, j, k, ncomp, r);
+                        }
+                    }
+                });
+                return;
+            }
+#endif
             auto nblocks_per_box = parforinfo.getNBlocksPerBox(AMREX_GPU_MAX_THREADS);
             AMREX_ASSERT(Long(nblocks_per_box)*Long(nboxes) < Long(std::numeric_limits<int>::max()));
             const int nblocks = nblocks_per_box * nboxes;
@@ -684,6 +750,31 @@ public:
     {
         if (box.isEmpty()) { return; }
         using ReduceTuple = typename D::Type;
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) {
+            // One unit = one x-row of the box.
+            const BoxIndexerND<dim> indexer(box);
+            IndexTypeND<dim> ixtype = box.ixType();
+            const int len0 = box.length(0);
+            eval_cpu_units(reduce_data, Long(indexer.numPts()/std::uint64_t(len0)),
+            [=] AMREX_GPU_DEVICE (Long row, ReduceTuple& r) noexcept
+            {
+                auto iv = indexer.intVect(std::uint64_t(row)*std::uint64_t(len0));
+                for (int i = 0; i < len0; ++i, ++iv[0]) {
+                    if constexpr (std::is_same_v<Reduce::detail::iterate_box,Tag>) {
+                        auto pr = Reduce::detail::call_f_intvect_box(f, iv, ixtype);
+                        Reduce::detail::for_each_local<0, ReduceTuple, Ps...>(r, pr);
+                    } else {
+                        for (int n = 0; n < ncomp; ++n) {
+                            auto pr = Reduce::detail::call_f_intvect_n(f, iv, n);
+                            Reduce::detail::for_each_local<0, ReduceTuple, Ps...>(r, pr);
+                        }
+                    }
+                }
+            });
+            return;
+        }
+#endif
         auto const& stream = Gpu::gpuStream();
         auto dp = reduce_data.devicePtr(stream);
         int& nblocks = reduce_data.nBlocks(stream);
@@ -814,6 +905,24 @@ public:
     {
         if (n <= 0) { return; }
         using ReduceTuple = typename D::Type;
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) {
+            // One unit = one contiguous chunk of at least 256 elements, with
+            // at most maxBlocks() chunks so that each work-item takes one.
+            const Long chunk = std::max<Long>(256, (Long(n)+reduce_data.maxBlocks()-1)
+                                                   / reduce_data.maxBlocks());
+            eval_cpu_units(reduce_data, (Long(n)+chunk-1)/chunk,
+            [=] AMREX_GPU_DEVICE (Long unit, ReduceTuple& r) noexcept
+            {
+                const Long iend = std::min<Long>(Long(n), (unit+1)*chunk);
+                for (Long i = unit*chunk; i < iend; ++i) {
+                    auto pr = f(N(i));
+                    Reduce::detail::for_each_local<0, ReduceTuple, Ps...>(r,pr);
+                }
+            });
+            return;
+        }
+#endif
         auto const& stream = Gpu::gpuStream();
         auto dp = reduce_data.devicePtr(stream);
         int& nblocks = reduce_data.nBlocks(stream);
