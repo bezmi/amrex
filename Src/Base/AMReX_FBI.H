@@ -71,15 +71,13 @@ fab_to_fab (Vector<Array4CopyTag<T0, T1> > const& copy_tags, int scomp, int dcom
 {
     TagVector<Array4CopyTag<T0, T1>> tv{copy_tags};
 
-    detail::ParallelFor_doit(tv,
+    detail::ParallelFor_doit(tv, ncomp,
         [=] AMREX_GPU_DEVICE (
-            int icell, int ncells, int i, int j, int k, Array4CopyTag<T0, T1> const& tag) noexcept
+            int icell, int ncells, int i, int j, int k, int n, Array4CopyTag<T0, T1> const& tag) noexcept
     {
         if (icell < ncells) {
-            for (int n = 0; n < ncomp; ++n) {
-                f(&(tag.dfab(i,j,k,n+dcomp)),
-                  tag.sfab(i+tag.offset.x,j+tag.offset.y,k+tag.offset.z,n+scomp));
-            }
+            f(&(tag.dfab(i,j,k,n+dcomp)),
+              tag.sfab(i+tag.offset.x,j+tag.offset.y,k+tag.offset.z,n+scomp));
         }
     });
 }
@@ -362,17 +360,15 @@ requires (amrex::HasAtomicAdd<V>::value)
 void unpack_recv_buffer_gpu_atomic_add (char* pbuffer, TagVector<TT> const& tv,
                                         int dcomp, int ncomp)
 {
-    detail::ParallelFor_doit(tv,
+    detail::ParallelFor_doit(tv, ncomp,
         [=] AMREX_GPU_DEVICE (
-            int icell, int ncells, int i, int j, int k, TT const& tag) noexcept
+            int icell, int ncells, int i, int j, int k, int n, TT const& tag) noexcept
         {
             if (icell < ncells) {
                 Array4<B const> sfab{(B const*)(pbuffer+tag.poff),
                     amrex::begin(tag.bx), amrex::end(tag.bx), ncomp};
-                for (int n = 0; n < ncomp; ++n) {
-                    Gpu::Atomic::AddNoRet(tag.dfab.ptr(i,j,k,n+dcomp),
-                                          (V)sfab(i,j,k,n));
-                }
+                Gpu::Atomic::AddNoRet(tag.dfab.ptr(i,j,k,n+dcomp),
+                                      (V)sfab(i,j,k,n));
             }
         });
 }
@@ -556,16 +552,14 @@ FabArray<FAB>::FB_local_copy_gpu (const FB& TheFB, int scomp, int ncomp)
     {
         auto* tv = FB_get_local_copy_tag_vector(TheFB);
 
-        detail::ParallelFor_doit(*tv,
+        detail::ParallelFor_doit(*tv, ncomp,
             [=] AMREX_GPU_DEVICE (
-                int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+                int icell, int ncells, int i, int j, int k, int n, TagType const& tag) noexcept
         {
             if (icell < ncells) {
-                for (int n = 0; n < ncomp; ++n) {
-                    tag.dfab(i,j,k,n+scomp) = tag.sfab(i+tag.offset.x,
-                                                       j+tag.offset.y,
-                                                       k+tag.offset.z,n+scomp);
-                }
+                tag.dfab(i,j,k,n+scomp) = tag.sfab(i+tag.offset.x,
+                                                   j+tag.offset.y,
+                                                   k+tag.offset.z,n+scomp);
             }
         });
     }
@@ -1139,16 +1133,14 @@ FabArray<FAB>::pack_send_buffer_gpu (FabArray<FAB> const& src, int scomp, int nc
 
     char* pbuffer = send_data[0];
 
-    detail::ParallelFor_doit(*tv,
+    detail::ParallelFor_doit(*tv, ncomp,
         [=] AMREX_GPU_DEVICE (
-            int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+            int icell, int ncells, int i, int j, int k, int n, TagType const& tag) noexcept
     {
         if (icell < ncells) {
             Array4<BUF> dfab{(BUF*)(pbuffer+tag.poff),
                 amrex::begin(tag.bx), amrex::end(tag.bx), ncomp};
-            for (int n = 0; n < ncomp; ++n) {
-                dfab(i,j,k,n) = (BUF)tag.sfab(i,j,k,n+scomp);
-            }
+            dfab(i,j,k,n) = (BUF)tag.sfab(i,j,k,n+scomp);
         }
     });
 
@@ -1280,32 +1272,28 @@ FabArray<FAB>::unpack_recv_buffer_gpu (FabArray<FAB>& dst, int dcomp, int ncomp,
 
         if (op == FabArrayBase::COPY)
         {
-            detail::ParallelFor_doit(*tv,
+            detail::ParallelFor_doit(*tv, ncomp,
                 [=] AMREX_GPU_DEVICE (
-                    int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+                    int icell, int ncells, int i, int j, int k, int n, TagType const& tag) noexcept
             {
                 if (icell < ncells) {
                     Array4<BUF const> sfab{(BUF const*)(pbuffer+tag.poff),
                         amrex::begin(tag.bx), amrex::end(tag.bx), ncomp};
-                    for (int n = 0; n < ncomp; ++n) {
-                        tag.dfab(i,j,k,n+dcomp) = (value_type)sfab(i,j,k,n);
-                    }
+                    tag.dfab(i,j,k,n+dcomp) = (value_type)sfab(i,j,k,n);
                 }
             });
         }
         else
         {
             if (is_thread_safe) {
-                detail::ParallelFor_doit(*tv,
+                detail::ParallelFor_doit(*tv, ncomp,
                     [=] AMREX_GPU_DEVICE (
-                        int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+                        int icell, int ncells, int i, int j, int k, int n, TagType const& tag) noexcept
                 {
                     if (icell < ncells) {
                         Array4<BUF const> sfab{(BUF const*)(pbuffer+tag.poff),
                             amrex::begin(tag.bx), amrex::end(tag.bx), ncomp};
-                        for (int n = 0; n < ncomp; ++n) {
-                            tag.dfab(i,j,k,n+dcomp) += (value_type)sfab(i,j,k,n);
-                        }
+                        tag.dfab(i,j,k,n+dcomp) += (value_type)sfab(i,j,k,n);
                     }
                 });
             } else {

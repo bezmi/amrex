@@ -781,6 +781,9 @@ public:
         int getNBlocksPerBox (int nthreads) const {
             return int((m_ncellsmax+nthreads-1)/nthreads);
         }
+        //! Largest number of x-rows (points divided by the x length) of any
+        //! box. Used by the one-row-per-work-item kernels on a SYCL CPU device.
+        int getNRowsPerBox () const { return int(m_nrowsmax); }
         BoxIndexer const* getBoxes () const { return m_boxes; }
 
         ParForInfo () = delete;
@@ -795,6 +798,7 @@ public:
         IntVect m_stride{1};
         IntVect m_offset{0};
         Long m_ncellsmax = 0;
+        Long m_nrowsmax = 0;
         BoxIndexer* m_boxes = nullptr;
         char* m_hp = nullptr;
     };

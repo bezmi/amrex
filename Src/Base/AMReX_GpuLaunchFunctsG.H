@@ -143,6 +143,24 @@ namespace detail {
         }
     }
 
+    // call_f_intvect_comp_handler: one component (the caller loops over components)
+
+    template <typename F, typename T, int dim>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    auto call_f_intvect_comp_handler (F const& f, IntVectND<dim> iv, T n, Gpu::Handler const&)
+        noexcept -> decltype(call_f_intvect_inner(std::make_index_sequence<dim>(), f, iv, 0))
+    {
+        call_f_intvect_inner(std::make_index_sequence<dim>(), f, iv, n);
+    }
+
+    template <typename F, typename T, int dim>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    auto call_f_intvect_comp_handler (F const& f, IntVectND<dim> iv, T n, Gpu::Handler const& handler)
+        noexcept -> decltype(call_f_intvect_inner(std::make_index_sequence<dim>(), f, iv, 0, Gpu::Handler{}))
+    {
+        call_f_intvect_inner(std::make_index_sequence<dim>(), f, iv, n, handler);
+    }
+
 }
 /// \endcond
 
@@ -438,7 +456,41 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, L const& f
                     }
                 });
             });
+#endif
         } else {
+#if defined(__ACPP__)
+            if (Gpu::Device::isCpuDevice()) {
+                // SYCL CPU device: one x-row per work-item (see the version
+                // without ncomp). The component loop is outside the row
+                // loop so that the inner loop has no nested run-time loop.
+                std::uint64_t const len0 = box.length(0);
+                std::uint64_t const nrows = indexer.numPts() / len0;
+                constexpr std::size_t G = Gpu::Device::cpu_device_group_size;
+                std::size_t const ngroups = (nrows + G - 1) / G;
+                q.submit([&] (sycl::handler& h) {
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(ngroups*G),
+                                                     sycl::range<1>(G)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        for (std::uint64_t row = item.get_global_id(0), stride = item.get_global_range(0);
+                             row < nrows; row += stride) {
+                            auto const iv0 = indexer.intVect(row*len0);
+                            for (T n = 0; n < ncomp; ++n) {
+                                auto iv = iv0;
+                                for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
+                                    if constexpr (detail::is_big_kernel<L>()) {
+                                        detail::call_f_intvect_comp_handler(*pf,iv,n,Gpu::Handler{&item});
+                                    } else {
+                                        detail::call_f_intvect_comp_handler(f,iv,n,Gpu::Handler{&item});
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+                return;
+            }
+#endif
             q.submit([&] (sycl::handler& h) {
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),
@@ -506,7 +558,39 @@ void ParallelFor (Gpu::KernelInfo const& info, BoxND<dim> const& box, T ncomp, L
                     }
                 });
             });
+#endif
         } else {
+#if defined(__ACPP__)
+            if (Gpu::Device::isCpuDevice()) {
+                // SYCL CPU device: one x-row per work-item with a contiguous
+                // inner loop; the index math runs once per row, not per cell.
+                // Small work-groups (one group is run by one OpenMP thread)
+                // so that small boxes still spread over all threads.
+                std::uint64_t const len0 = box.length(0);
+                std::uint64_t const nrows = indexer.numPts() / len0;
+                constexpr std::size_t G = Gpu::Device::cpu_device_group_size;
+                std::size_t const ngroups = (nrows + G - 1) / G;
+                q.submit([&] (sycl::handler& h) {
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(ngroups*G),
+                                                     sycl::range<1>(G)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        for (std::uint64_t row = item.get_global_id(0), stride = item.get_global_range(0);
+                             row < nrows; row += stride) {
+                            auto iv = indexer.intVect(row*len0);
+                            for (std::uint64_t i = 0; i < len0; ++i, ++iv[0]) {
+                                if constexpr (detail::is_big_kernel<L>()) {
+                                    detail::call_f_intvect_handler(*pf,iv,Gpu::Handler{&item});
+                                } else {
+                                    detail::call_f_intvect_handler(f,iv,Gpu::Handler{&item});
+                                }
+                            }
+                        }
+                    });
+                });
+                return;
+            }
+#endif
             q.submit([&] (sycl::handler& h) {
                 h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                                  sycl::range<1>(nthreads_per_block)),

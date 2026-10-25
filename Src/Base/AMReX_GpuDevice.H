@@ -242,6 +242,17 @@ public:
     static Long maxMemAllocSize () noexcept { return device_prop.maxMemAllocSize; }
     static sycl::context& syclContext () { return *sycl_context; }
     static sycl::device& syclDevice () { return *sycl_device; }
+    //! True when the SYCL device is a CPU (e.g., AdaptiveCpp's OpenMP host
+    //! device). Kernels that are indexed per cell use one x-row per
+    //! work-item there instead of one cell per work-item.
+    static bool isCpuDevice () noexcept { return device_is_cpu; }
+
+    //! Work-items per work-group for the row kernels on a SYCL CPU device.
+    //! There a work-group is run by one OpenMP thread and the threads share
+    //! the work-groups, so a kernel can use at most as many threads as it
+    //! has groups. With one x-row per work-item a 32^3 box has 1024 rows:
+    //! 8 rows per group give 128 groups, 256 would give 4.
+    static constexpr int cpu_device_group_size = 8;
 #endif
 #endif
 
@@ -277,6 +288,7 @@ private:
 #ifdef AMREX_USE_SYCL
     static AMREX_EXPORT std::unique_ptr<sycl::context> sycl_context;
     static AMREX_EXPORT std::unique_ptr<sycl::device>  sycl_device;
+    static AMREX_EXPORT bool device_is_cpu;
 #endif
 
     friend StreamManager;

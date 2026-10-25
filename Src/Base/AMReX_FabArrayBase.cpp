@@ -2770,12 +2770,21 @@ FabArrayBase::isFusingCandidate () const noexcept // NOLINT(readability-convert-
 
 #ifdef AMREX_USE_GPU
 
+namespace {
+    // Number of x-rows of a box: 0 for an empty box.
+    Long par_for_nrows (Box const& b)
+    {
+        return (b.ok() && b.length(0) > 0) ? b.numPts() / b.length(0) : Long(0);
+    }
+}
+
 FabArrayBase::ParForInfo::ParForInfo (const FabArrayBase& fa, const IntVect& nghost)
     : m_bat(fa.boxArray().transformer()),
       m_ng(nghost)
 {
     Vector<Box> boxes;
     m_ncellsmax = 0;
+    m_nrowsmax = 0;
     for (int K : fa.indexArray) {
         Long N = 0;
         Box b = fa.box(K);
@@ -2785,6 +2794,7 @@ FabArrayBase::ParForInfo::ParForInfo (const FabArrayBase& fa, const IntVect& ngh
         }
         boxes.push_back(b);
         m_ncellsmax = std::max(m_ncellsmax, N);
+        m_nrowsmax = std::max(m_nrowsmax, par_for_nrows(b));
     }
     detail::build_par_for_boxes(m_hp, m_boxes, boxes);
 }
@@ -2799,10 +2809,12 @@ FabArrayBase::ParForInfo::ParForInfo (const FabArrayBase& fa, const IntVect& str
 {
     Vector<Box> boxes;
     m_ncellsmax = 0;
+    m_nrowsmax = 0;
     for (int K : fa.indexArray) {
         Box const& b = fa.box(K);
         boxes.push_back(b.ok() ? detail::strided_box(b, stride, offset) : Box());
         m_ncellsmax = std::max(m_ncellsmax, boxes.back().numPts());
+        m_nrowsmax = std::max(m_nrowsmax, par_for_nrows(boxes.back()));
     }
     detail::build_par_for_boxes(m_hp, m_boxes, boxes);
 }
@@ -2815,6 +2827,7 @@ FabArrayBase::ParForInfo::ParForInfo (const FabArrayBase& fa, RedBlack)
     const IntVect stride(AMREX_D_DECL(2,1,1));
     Vector<Box> boxes;
     m_ncellsmax = 0;
+    m_nrowsmax = 0;
     for (int K : fa.indexArray) {
         Box const& b = fa.box(K);
         for (int parity = 0; parity < 2; ++parity) {
@@ -2822,6 +2835,7 @@ FabArrayBase::ParForInfo::ParForInfo (const FabArrayBase& fa, RedBlack)
             boxes.push_back(b.ok() ? detail::strided_box(b, stride, offset) : Box());
             // A launch enumerates the larger of the two lattices.
             m_ncellsmax = std::max(m_ncellsmax, boxes.back().numPts());
+            m_nrowsmax = std::max(m_nrowsmax, par_for_nrows(boxes.back()));
         }
     }
     detail::build_par_for_boxes(m_hp, m_boxes, boxes);

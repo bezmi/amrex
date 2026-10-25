@@ -149,6 +149,31 @@ namespace detail {
     requires (std::is_integral_v<std::decay_t<decltype(std::declval<T>().size())> >)
     constexpr bool is_box_tag (T const&) { return false; }
 
+#ifdef AMREX_USE_GPU
+    // Elements per work unit for vector tags on a SYCL CPU device.
+    constexpr int tag_cpu_chunk_size = 256;
+
+    // A tag is split into work units. On GPUs a unit is one warp of cells,
+    // one cell per thread. On a SYCL CPU device (AdaptiveCpp's OpenMP
+    // backend) a work-item is one scalar loop iteration, so a unit is one
+    // x-row of a box tag, or tag_cpu_chunk_size consecutive elements of a
+    // vector tag, and the work-item loops over the unit's cells.
+    template <typename T>
+    Long get_tag_nunits (T const& tag) noexcept
+    {
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) {
+            if constexpr (is_box_tag(T{})) {
+                auto const len = amrex::length(tag.box());
+                return (len.x > 0) ? tag.box().numPts() / len.x : Long(0);
+            } else {
+                return (get_tag_size(tag) + tag_cpu_chunk_size - 1) / tag_cpu_chunk_size;
+            }
+        }
+#endif
+        return (get_tag_size(tag) + Gpu::Device::warp_size-1) / Gpu::Device::warp_size;
+    }
+#endif
 }
 /// \endcond
 
@@ -158,9 +183,9 @@ struct TagVector {
     char* h_buffer = nullptr;
     char* d_buffer = nullptr;
     TagType* d_tags =  nullptr;
-    int* d_nwarps = nullptr;
+    int* d_nunits = nullptr;   // prefix sum of work units per tag, ntags+1 entries
     int ntags = 0;
-    int ntotwarps = 0;
+    int ntotunits = 0;
     int nblocks = 0;
     bool defined = false;
     static constexpr int nthreads = 256;
@@ -183,18 +208,18 @@ struct TagVector {
         : h_buffer{other.h_buffer},
           d_buffer{other.d_buffer},
           d_tags{other.d_tags},
-          d_nwarps{other.d_nwarps},
+          d_nunits{other.d_nunits},
           ntags{other.ntags},
-          ntotwarps{other.ntotwarps},
+          ntotunits{other.ntotunits},
           nblocks{other.nblocks},
           defined{other.defined}
     {
         other.h_buffer = nullptr;
         other.d_buffer = nullptr;
         other.d_tags = nullptr;
-        other.d_nwarps = nullptr;
+        other.d_nunits = nullptr;
         other.ntags = 0;
-        other.ntotwarps = 0;
+        other.ntotunits = 0;
         other.nblocks = 0;
         other.defined = false;
     }
@@ -209,12 +234,12 @@ struct TagVector {
         other.d_buffer = nullptr;
         d_tags = other.d_tags;
         other.d_tags = nullptr;
-        d_nwarps = other.d_nwarps;
-        other.d_nwarps = nullptr;
+        d_nunits = other.d_nunits;
+        other.d_nunits = nullptr;
         ntags = other.ntags;
         other.ntags = 0;
-        ntotwarps = other.ntotwarps;
-        other.ntotwarps = 0;
+        ntotunits = other.ntotunits;
+        other.ntotunits = 0;
         nblocks = other.nblocks;
         other.nblocks = 0;
         defined = other.defined;
@@ -236,43 +261,48 @@ struct TagVector {
         }
 
 #ifdef AMREX_USE_GPU
-        Long l_ntotwarps = 0;
-        ntotwarps = 0;
-        Vector<int> nwarps;
-        nwarps.reserve(ntags+1);
+        Long l_ntotunits = 0;
+        ntotunits = 0;
+        Vector<int> nunits;
+        nunits.reserve(ntags+1);
         for (int i = 0; i < ntags; ++i)
         {
             auto& tag = tags[i];
-            nwarps.push_back(ntotwarps);
-            auto nw = (detail::get_tag_size(tag) + Gpu::Device::warp_size-1) /
-                Gpu::Device::warp_size;
-            l_ntotwarps += nw;
-            ntotwarps += static_cast<int>(nw);
+            nunits.push_back(ntotunits);
+            auto nu = detail::get_tag_nunits(tag);
+            l_ntotunits += nu;
+            ntotunits += static_cast<int>(nu);
         }
-        nwarps.push_back(ntotwarps);
+        nunits.push_back(ntotunits);
 
         std::size_t sizeof_tags = ntags*sizeof(TagType);
-        std::size_t offset_nwarps = Arena::align(sizeof_tags);
-        std::size_t sizeof_nwarps = (ntags+1)*sizeof(int);
-        std::size_t total_buf_size = offset_nwarps + sizeof_nwarps;
+        std::size_t offset_nunits = Arena::align(sizeof_tags);
+        std::size_t sizeof_nunits = (ntags+1)*sizeof(int);
+        std::size_t total_buf_size = offset_nunits + sizeof_nunits;
 
         h_buffer = (char*)The_Pinned_Arena()->alloc(total_buf_size);
         d_buffer = (char*)The_Arena()->alloc(total_buf_size);
 
         std::memcpy(h_buffer, tags.data(), sizeof_tags);
-        std::memcpy(h_buffer+offset_nwarps, nwarps.data(), sizeof_nwarps);
+        std::memcpy(h_buffer+offset_nunits, nunits.data(), sizeof_nunits);
         Gpu::htod_memcpy_async(d_buffer, h_buffer, total_buf_size);
 
         d_tags = reinterpret_cast<TagType*>(d_buffer);
-        d_nwarps = reinterpret_cast<int*>(d_buffer+offset_nwarps);
+        d_nunits = reinterpret_cast<int*>(d_buffer+offset_nunits);
 
-        constexpr int nwarps_per_block = nthreads/Gpu::Device::warp_size;
-        nblocks = (ntotwarps + nwarps_per_block-1) / nwarps_per_block;
+        // Units per block: nthreads/warp_size on GPUs (one warp per unit).
+        // On a SYCL CPU device each work-item handles a whole unit and the
+        // block is the small cpu_device_group_size (see AMReX_GpuDevice.H).
+        int nunits_per_block = nthreads/Gpu::Device::warp_size;
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) { nunits_per_block = Gpu::Device::cpu_device_group_size; }
+#endif
+        nblocks = (ntotunits + nunits_per_block-1) / nunits_per_block;
 
         defined = true;
 
-        amrex::ignore_unused(l_ntotwarps);
-        AMREX_ALWAYS_ASSERT(l_ntotwarps+nwarps_per_block-1 < Long(std::numeric_limits<int>::max()));
+        amrex::ignore_unused(l_ntotunits);
+        AMREX_ALWAYS_ASSERT(l_ntotunits+nunits_per_block-1 < Long(std::numeric_limits<int>::max()));
 #else
         std::size_t sizeof_tags = ntags*sizeof(TagType);
         h_buffer = (char*)The_Pinned_Arena()->alloc(sizeof_tags);
@@ -293,9 +323,9 @@ struct TagVector {
             h_buffer = nullptr;
             d_buffer = nullptr;
             d_tags = nullptr;
-            d_nwarps = nullptr;
+            d_nunits = nullptr;
             ntags = 0;
-            ntotwarps = 0;
+            ntotunits = 0;
             nblocks = 0;
             defined = false;
         }
@@ -333,19 +363,99 @@ void tagparfor_call_f (int i, T const& tag, F&& f) noexcept
     f(i, N, tag);
 }
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+// SYCL CPU device: one work-item handles a whole unit (see get_tag_nunits).
+// Box tag: unit `row` is the x-row (j,k) of the tag box; f is called for
+// each cell with the same (icell, ncells, i, j, k, tag) arguments as on GPUs.
+template <typename T, typename F>
+requires (std::same_as<std::decay_t<decltype(std::declval<T>().box())>, Box>)
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+void tagparfor_call_unit (int row, T const& tag, F&& f) noexcept
+{
+    int ncells = tag.box().numPts();
+    const auto len = amrex::length(tag.box());
+    const auto lo  = amrex::lbound(tag.box());
+    int k = row / len.y;
+    int j = row - k*len.y;
+    int icell = row*len.x;
+    j += lo.y;
+    k += lo.z;
+    for (int i = 0; i < len.x; ++i) {
+        f(icell+i, ncells, lo.x+i, j, k, tag);
+    }
+}
+
+// Box tag with components: the component loop is outside the row loop, so
+// the inner loop over i has no nested loop of run-time trip count (that
+// blocked strength reduction and vectorization; measured 2.6x slower).
+template <typename T, typename F>
+requires (std::same_as<std::decay_t<decltype(std::declval<T>().box())>, Box>)
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+void tagparfor_call_unit (int row, int ncomp, T const& tag, F&& f) noexcept
+{
+    int ncells = tag.box().numPts();
+    const auto len = amrex::length(tag.box());
+    const auto lo  = amrex::lbound(tag.box());
+    int k = row / len.y;
+    int j = row - k*len.y;
+    int icell = row*len.x;
+    j += lo.y;
+    k += lo.z;
+    for (int n = 0; n < ncomp; ++n) {
+        for (int i = 0; i < len.x; ++i) {
+            f(icell+i, ncells, lo.x+i, j, k, n, tag);
+        }
+    }
+}
+
+// Vector tag: unit `chunk` is tag_cpu_chunk_size consecutive elements.
+template <typename T, typename F>
+requires (std::is_integral_v<std::decay_t<decltype(std::declval<T>().size())> >)
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+void tagparfor_call_unit (int chunk, T const& tag, F&& f) noexcept
+{
+    int N = tag.size();
+    int ibeg = chunk*tag_cpu_chunk_size;
+    int iend = amrex::min(ibeg+tag_cpu_chunk_size, N);
+    for (int i = ibeg; i < iend; ++i) {
+        f(i, N, tag);
+    }
+}
+#endif
+
 template <class TagType, class F>
 void
 ParallelFor_doit (TagVector<TagType> const& tv, F const& f)
 {
     AMREX_ALWAYS_ASSERT(tv.is_defined());
 
-    if (tv.ntags == 0 || tv.ntotwarps == 0) { return; }
+    if (tv.ntags == 0 || tv.ntotunits == 0) { return; }
 
     const auto d_tags = tv.d_tags;
-    const auto d_nwarps = tv.d_nwarps;
+    const auto d_nunits = tv.d_nunits;
     const auto ntags = tv.ntags;
-    const auto ntotwarps = tv.ntotwarps;
+    const auto ntotunits = tv.ntotunits;
     constexpr auto nthreads = TagVector<TagType>::nthreads;
+
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    if (Gpu::Device::isCpuDevice()) {
+        // One unit (x-row or chunk) per work-item in small groups; the
+        // TagVector was defined with the matching unit layout.
+        amrex::launch<Gpu::Device::cpu_device_group_size>(tv.nblocks, Gpu::gpuStream(),
+        [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+        {
+            int unit = int(item.get_global_id(0));
+            if (unit >= ntotunits) { return; }
+            int tag_id = amrex::bisect(d_nunits, 0, ntags, unit);
+            // Local copy of the tag: with the tag referenced in global memory
+            // the compiler reloads the Array4 strides inside the row loop
+            // (measured 1.6x slower).
+            TagType const tag = d_tags[tag_id];
+            tagparfor_call_unit(unit - d_nunits[tag_id], tag, f);
+        });
+        return;
+    }
+#endif
 
     amrex::launch<nthreads>(tv.nblocks, Gpu::gpuStream(),
 #ifdef AMREX_USE_SYCL
@@ -362,11 +472,11 @@ ParallelFor_doit (TagVector<TagType> const& tv, F const& f)
         auto g_tid = std::size_t(blockDim.x)*blockIdx.x + threadIdx.x;
 #endif
         auto g_wid = int(g_tid / Gpu::Device::warp_size);
-        if (g_wid >= ntotwarps) { return; }
+        if (g_wid >= ntotunits) { return; }
 
-        int tag_id = amrex::bisect(d_nwarps, 0, ntags, g_wid);
+        int tag_id = amrex::bisect(d_nunits, 0, ntags, g_wid);
 
-        int b_wid = g_wid - d_nwarps[tag_id]; // b_wid'th warp on this box
+        int b_wid = g_wid - d_nunits[tag_id]; // b_wid'th warp on this box
 #ifdef AMREX_USE_SYCL
         int lane = item.get_local_id(0) % Gpu::Device::warp_size;
 #else
@@ -375,6 +485,47 @@ ParallelFor_doit (TagVector<TagType> const& tv, F const& f)
         int icell = b_wid*Gpu::Device::warp_size + lane;
 
         tagparfor_call_f(icell, d_tags[tag_id], f);
+    });
+}
+
+// Box tags with ncomp components: f(icell, ncells, i, j, k, n, tag) is
+// called once per cell and component. On GPUs each thread loops over the
+// components of its cell; on a SYCL CPU device the component loop is
+// outside the row loop (see tagparfor_call_unit).
+template <class TagType, class F>
+requires (std::same_as<std::decay_t<decltype(std::declval<TagType>().box())>, Box>)
+void
+ParallelFor_doit (TagVector<TagType> const& tv, int ncomp, F const& f)
+{
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    if (Gpu::Device::isCpuDevice()) {
+        AMREX_ALWAYS_ASSERT(tv.is_defined());
+        if (tv.ntags == 0 || tv.ntotunits == 0) { return; }
+
+        const auto d_tags = tv.d_tags;
+        const auto d_nunits = tv.d_nunits;
+        const auto ntags = tv.ntags;
+        const auto ntotunits = tv.ntotunits;
+
+        amrex::launch<Gpu::Device::cpu_device_group_size>(tv.nblocks, Gpu::gpuStream(),
+        [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+        {
+            int unit = int(item.get_global_id(0));
+            if (unit >= ntotunits) { return; }
+            int tag_id = amrex::bisect(d_nunits, 0, ntags, unit);
+            TagType const tag = d_tags[tag_id];
+            tagparfor_call_unit(unit - d_nunits[tag_id], ncomp, tag, f);
+        });
+        return;
+    }
+#endif
+    ParallelFor_doit(tv,
+        [=] AMREX_GPU_DEVICE (
+            int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+    {
+        for (int n = 0; n < ncomp; ++n) {
+            f(icell, ncells, i, j, k, n, tag);
+        }
     });
 }
 
@@ -435,9 +586,18 @@ template <class TagType, class F>
 requires (std::same_as<std::decay_t<decltype(std::declval<TagType>().box())>, Box>)
 void ParallelFor (TagVector<TagType> const& tv, int ncomp, F const& f)
 {
-    detail::ParallelFor_doit(tv,
+#ifdef AMREX_USE_GPU
+    detail::ParallelFor_doit(tv, ncomp,
         [=] AMREX_GPU_DEVICE (
-            int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
+            int icell, int ncells, int i, int j, int k, int n, TagType const& tag) noexcept
+        {
+            if (icell < ncells) {
+                f(i,j,k,n,tag);
+            }
+        });
+#else
+    detail::ParallelFor_doit(tv,
+        [=] (int icell, int ncells, int i, int j, int k, TagType const& tag) noexcept
         {
             if (icell < ncells) {
                 for (int n = 0; n < ncomp; ++n) {
@@ -445,6 +605,7 @@ void ParallelFor (TagVector<TagType> const& tv, int ncomp, F const& f)
                 }
             }
         });
+#endif
 }
 
 template <class TagType, class F>

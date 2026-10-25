@@ -61,6 +61,43 @@ namespace parfor_mf_detail {
             f(b,i,j,k,n);
         }
     }
+
+    // Row versions for the SYCL CPU device: f is called for the lenx
+    // consecutive points (i0, j, k) ... (i0+lenx-1, j, k) of box b. The
+    // component loop is outside the row loop; a run-time component loop
+    // inside the row loop defeats vectorization (measured 2.6x slower).
+    template <typename F>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    auto call_f_row (F const& f, int b, int i0, int lenx, int j, int k, int) noexcept
+        -> decltype(f(0,0,0,0))
+    {
+        for (int i = 0; i < lenx; ++i) {
+            f(b,i0+i,j,k);
+        }
+    }
+
+    template <typename F>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    auto call_f_row (F const& f, int b, int i0, int lenx, int j, int k, int ncomp) noexcept
+        -> decltype(f(0,0,0,0,0))
+    {
+        for (int n = 0; n < ncomp; ++n) {
+            for (int i = 0; i < lenx; ++i) {
+                f(b,i0+i,j,k,n);
+            }
+        }
+    }
+}
+
+// Number of points along x of the box tracked by a BoxIndexer.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+int box_indexer_len_x (BoxIndexer const& indexer)
+{
+#if (AMREX_SPACEDIM == 1)
+    return int(indexer.npts);
+#else
+    return int(indexer.fdm[0].divisor);
+#endif
 }
 
 template <int MT, FabArrayType MF, typename F>
@@ -80,10 +117,43 @@ ParallelFor_doit (MF const& mf, IntVect const& nghost, int ncomp, IntVect const&
         });
     } else {
         auto const& parforinfo = mf.getParForInfo(nghost);
+        const BoxIndexer* dp_boxes = parforinfo.getBoxes();
+
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) {
+            // One x-row per work-item, as in AMReX_TagParallelFor.H. Boxes
+            // with fewer rows than the largest one leave their trailing
+            // work-items idle.
+            const int nrows_per_box = parforinfo.getNRowsPerBox();
+            const Long nunits_long = Long(nrows_per_box)*Long(nboxes);
+            AMREX_ASSERT(nunits_long < Long(std::numeric_limits<int>::max()));
+            const int nunits = int(nunits_long);
+            constexpr int G = Gpu::Device::cpu_device_group_size;
+            amrex::launch<G>(int((nunits_long+G-1)/G), Gpu::gpuStream(),
+                [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+                {
+                    const int unit = int(item.get_global_id(0));
+                    if (unit >= nunits) { return; }
+                    const int ibox = unit / nrows_per_box;
+                    const int row = unit - ibox*nrows_per_box;
+                    // Local copy: referenced in global memory, the indexer's
+                    // fields are reloaded inside the row loop.
+                    BoxIndexer const indexer = dp_boxes[ibox];
+                    const int lenx = box_indexer_len_x(indexer);
+                    const auto icell0 = std::uint64_t(row)*std::uint64_t(lenx);
+                    if (icell0 < indexer.numPts()) {
+                        auto [i, j, k] = indexer(icell0);
+                        parfor_mf_detail::call_f_row(f, ibox, i, lenx, j, k, ncomp);
+                    }
+                });
+            AMREX_GPU_ERROR_CHECK();
+            return;
+        }
+#endif
+
         auto nblocks_per_box = parforinfo.getNBlocksPerBox(MT);
         AMREX_ASSERT(Long(nblocks_per_box)*Long(nboxes) < Long(std::numeric_limits<int>::max()));
         const int nblocks = nblocks_per_box * nboxes;
-        const BoxIndexer* dp_boxes = parforinfo.getBoxes();
 
 #if defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
 
@@ -184,17 +254,6 @@ ParallelForStrided_doit (MF const& mf, IntVect const& stride, IntVect const& off
              }
          });
     AMREX_GPU_ERROR_CHECK();
-}
-
-// Number of points along x of the box tracked by a BoxIndexer.
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-int box_indexer_len_x (BoxIndexer const& indexer)
-{
-#if (AMREX_SPACEDIM == 1)
-    return int(indexer.npts);
-#else
-    return int(indexer.fdm[0].divisor);
-#endif
 }
 
 // One launch over the red or black points of all boxes. Consecutive threads

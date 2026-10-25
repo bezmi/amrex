@@ -126,6 +126,7 @@ constexpr int Device::warp_size;
 #ifdef AMREX_USE_SYCL
 std::unique_ptr<sycl::context> Device::sycl_context;
 std::unique_ptr<sycl::device>  Device::sycl_device;
+bool Device::device_is_cpu = false;
 #endif
 
 namespace {
@@ -735,6 +736,7 @@ Device::initialize_gpu (bool minimal)
 #endif
         auto const& gpu_devices = platform.get_devices();
         sycl_device = std::make_unique<sycl::device>(gpu_devices[device_id]);
+        device_is_cpu = sycl_device->is_cpu();
 #if defined(SYCL_KHR_DEFAULT_CONTEXT)
         sycl_context = std::make_unique<sycl::context>(platform.khr_get_default_context());
 #else
