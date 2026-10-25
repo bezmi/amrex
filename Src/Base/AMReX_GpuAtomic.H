@@ -26,6 +26,36 @@ namespace detail {
 
 #ifdef AMREX_USE_SYCL
 
+#if defined(__ACPP__)
+    //! Returns 1 when the AdaptiveCpp CPU device runs each kernel on one
+    //! thread (one OpenMP thread, one stream), 0 otherwise. The CPU device
+    //! loads JIT-compiled kernels as shared libraries, which resolve this
+    //! function against the program; the AMReX::SYCL link options export it.
+    //! Weak, so a program without the export keeps the atomics. Const, so a
+    //! call can be moved out of loops.
+    [[gnu::weak, gnu::const]] int acpp_cpu_serial ();
+
+    //! Sets the value acpp_cpu_serial() returns. Called once by
+    //! Gpu::Device::Initialize before any kernel runs.
+    void acpp_set_cpu_serial (bool on) noexcept;
+
+    //! True in kernels compiled for a CPU target while acpp_cpu_serial()
+    //! returns 1: no two work-items run at the same time, so the atomic
+    //! operations below use plain loads and stores. Always false for GPU
+    //! targets; the JIT compiler removes the test there.
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    bool acpp_serial () noexcept
+    {
+        __acpp_if_target_sscp(
+            if (sycl::AdaptiveCpp_jit::reflect<
+                    sycl::AdaptiveCpp_jit::reflection_query::target_is_cpu>()) {
+                return &acpp_cpu_serial != nullptr && acpp_cpu_serial() != 0;
+            }
+        );
+        return false;
+    }
+#endif
+
     template <typename R, typename Int, typename F>
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
     R atomic_op (R* const address, R const val, F const f) noexcept
@@ -45,6 +75,11 @@ namespace detail {
         return *(reinterpret_cast<R const*>(&old_I));
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (acpp_serial()) {
+                R old = *address;
+                *address = f(*address, val);
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -91,6 +126,15 @@ namespace detail {
         return test_success;
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (acpp_serial()) {
+                R const tmp = op(*address, val);
+                if (cond(tmp)) {
+                    *address = tmp;
+                    return true;
+                } else {
+                    return false;
+                }
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -190,6 +234,11 @@ namespace detail {
         return a.fetch_add(value);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                T const old = *sum;
+                *sum = old + value;
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             sycl::atomic_ref<T,mo,ms,AS> a{*sum};
@@ -381,6 +430,11 @@ namespace detail {
         return a.fetch_min(value);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                T const old = *m;
+                *m = old < value ? old : value;
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -456,6 +510,11 @@ namespace detail {
         return a.fetch_max(value);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                T const old = *m;
+                *m = old > value ? old : value;
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -528,6 +587,11 @@ namespace detail {
         return a.fetch_or(value);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                int const old = *m;
+                *m = old | value;
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -566,6 +630,11 @@ namespace detail {
         return a.fetch_and(value ? ~0x0 : 0);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                int const old = *m;
+                *m = old & (value ? ~0x0 : 0);
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -605,6 +674,11 @@ namespace detail {
         return a.exchange(val);
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                T const old = *address;
+                *address = val;
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;
@@ -645,6 +719,11 @@ namespace detail {
         return compare;
 #elif defined(__ACPP__)
         AMREX_IF_ON_DEVICE((
+            if (detail::acpp_serial()) {
+                T const old = *address;
+                if (old == compare) { *address = val; }
+                return old;
+            }
             constexpr auto mo = sycl::memory_order::relaxed;
             constexpr auto ms = sycl::memory_scope::device;
             constexpr auto as = sycl::access::address_space::global_space;

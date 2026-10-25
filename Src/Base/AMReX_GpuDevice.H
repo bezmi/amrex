@@ -247,6 +247,11 @@ public:
     //! work-item there instead of one cell per work-item.
     static bool isCpuDevice () noexcept { return device_is_cpu; }
 
+    //! True when the CPU device runs each kernel on one thread (AdaptiveCpp
+    //! with one OpenMP thread per rank). AMReX then uses one stream, and the
+    //! Gpu::Atomic functions use plain loads and stores in kernels.
+    static bool isCpuDeviceSerial () noexcept { return device_cpu_serial; }
+
     //! Work-items per work-group for the row kernels on a SYCL CPU device.
     //! There a work-group is run by one OpenMP thread and the threads share
     //! the work-groups, so a kernel can use at most as many threads as it
@@ -289,6 +294,7 @@ private:
     static AMREX_EXPORT std::unique_ptr<sycl::context> sycl_context;
     static AMREX_EXPORT std::unique_ptr<sycl::device>  sycl_device;
     static AMREX_EXPORT bool device_is_cpu;
+    static AMREX_EXPORT bool device_cpu_serial;
 #endif
 
     friend StreamManager;

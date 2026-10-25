@@ -233,6 +233,7 @@ foreach(D IN LISTS AMReX_SPACEDIM)
        AMReX_GpuDevice.cpp
        AMReX_GpuBuffer.H
        AMReX_GpuAtomic.H
+       AMReX_GpuAtomicAcpp.cpp
        AMReX_GpuUtility.H
        AMReX_GpuUtility.cpp
        AMReX_GpuAsyncArray.H

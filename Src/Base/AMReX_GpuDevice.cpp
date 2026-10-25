@@ -23,6 +23,12 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__) && defined(__linux__) && defined(__GLIBC__)
+#include <cstring>
+#include <dlfcn.h>
+#include <link.h>
+#endif
+
 #if defined(AMREX_USE_CUDA)
 #include <cuda_profiler_api.h>
 #if defined(AMREX_PROFILING) || defined (AMREX_TINY_PROFILING)
@@ -72,6 +78,39 @@ namespace {
     sycl::platform amrex_sycl_platform ()
     {
         return sycl::device{sycl::default_selector_v}.get_platform();
+    }
+
+    // Threads that AdaptiveCpp's OpenMP CPU device uses for each kernel, or 0
+    // if unknown. The device runs a kernel with the default team of the OpenMP
+    // runtime it loaded (omp_get_max_threads()), which follows OMP_NUM_THREADS
+    // and the CPU affinity mask. AMReX built with AdaptiveCpp does not link
+    // OpenMP, so that runtime is found among the loaded shared objects and
+    // asked directly; RTLD_NOLOAD returns the instance already loaded instead
+    // of loading a second one.
+    int acpp_cpu_device_threads ()
+    {
+#if defined(__linux__) && defined(__GLIBC__)
+        std::string path;
+        dl_iterate_phdr([] (dl_phdr_info* info, std::size_t, void* data) -> int {
+            char const* name = info->dlpi_name;
+            if (name != nullptr && (std::strstr(name, "libomp.so") != nullptr ||
+                                    std::strstr(name, "libgomp.so") != nullptr ||
+                                    std::strstr(name, "libiomp5.so") != nullptr)) {
+                *static_cast<std::string*>(data) = name;
+                return 1;
+            }
+            return 0;
+        }, &path);
+        if (path.empty()) { return 0; }
+        void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+        if (handle == nullptr) { return 0; }
+        auto* get_max_threads = reinterpret_cast<int(*)()>(dlsym(handle, "omp_get_max_threads"));
+        int const nthreads = (get_max_threads != nullptr) ? get_max_threads() : 0;
+        dlclose(handle);
+        return nthreads;
+#else
+        return 0;
+#endif
     }
 #endif
 }
@@ -127,6 +166,7 @@ constexpr int Device::warp_size;
 std::unique_ptr<sycl::context> Device::sycl_context;
 std::unique_ptr<sycl::device>  Device::sycl_device;
 bool Device::device_is_cpu = false;
+bool Device::device_cpu_serial = false;
 #endif
 
 namespace {
@@ -737,6 +777,22 @@ Device::initialize_gpu (bool minimal)
         auto const& gpu_devices = platform.get_devices();
         sycl_device = std::make_unique<sycl::device>(gpu_devices[device_id]);
         device_is_cpu = sycl_device->is_cpu();
+#if defined(__ACPP__)
+        // With one OpenMP thread and one stream, no two work-items of any
+        // kernels run at the same time, and Gpu::Atomic uses plain loads and
+        // stores in kernels on the CPU device (AMReX_GpuAtomic.H). More
+        // streams would let kernels run at the same time on AdaptiveCpp's
+        // per-queue worker threads.
+        device_cpu_serial = device_is_cpu && (acpp_cpu_device_threads() == 1);
+        if (device_cpu_serial && max_gpu_streams > 1) {
+            max_gpu_streams = 1;
+            gpu_stream_pool = Vector<StreamManager>(max_gpu_streams);
+        }
+        Gpu::Atomic::detail::acpp_set_cpu_serial(device_cpu_serial);
+        if (device_cpu_serial && amrex::Verbose()) {
+            amrex::Print() << "SYCL CPU device with one thread: 1 stream, atomics as plain memory operations\n";
+        }
+#endif
 #if defined(SYCL_KHR_DEFAULT_CONTEXT)
         sycl_context = std::make_unique<sycl::context>(platform.khr_get_default_context());
 #else

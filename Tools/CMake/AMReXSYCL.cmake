@@ -37,9 +37,15 @@ if (AMReX_SYCL_ACPP)
    target_compile_options(SYCL
       INTERFACE
       $<$<COMPILE_LANGUAGE:CXX>:--acpp-targets=generic -Wno-tautological-constant-compare -Wno-return-type>)
+   # Kernels on AdaptiveCpp's CPU device are shared libraries loaded at run
+   # time; they call amrex::Gpu::Atomic::detail::acpp_cpu_serial()
+   # (AMReX_GpuAtomic.H), which must therefore be exported from the program.
+   # dlopen and dlsym are used to find the OpenMP runtime (AMReX_GpuDevice.cpp).
    target_link_options(SYCL
       INTERFACE
-      $<$<LINK_LANGUAGE:CXX>:--acpp-targets=generic>)
+      $<$<LINK_LANGUAGE:CXX>:--acpp-targets=generic>
+      $<$<LINK_LANGUAGE:CXX>:-Wl,--export-dynamic-symbol=_ZN5amrex3Gpu6Atomic6detail15acpp_cpu_serialEv>)
+   target_link_libraries(SYCL INTERFACE ${CMAKE_DL_LIBS})
    target_link_libraries(SYCL INTERFACE ONEMATH::onemath)
 
    unset(_cxx_sycl)
