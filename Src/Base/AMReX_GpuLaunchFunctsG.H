@@ -325,6 +325,30 @@ void launch (T const& n, L const& f)
     const auto nthreads_total = std::size_t(nthreads_per_block) * ec.numBlocks.x;
     auto& q = Gpu::Device::streamQueue();
     try {
+#if defined(__ACPP__)
+        if constexpr (Gpu::range_detail::is_box_v<T>) {
+            if (Gpu::Device::isCpuDevice()) {
+                // SYCL CPU device: f gets whole x-rows (see Gpu::RowRange).
+                constexpr std::size_t G = Gpu::Device::cpu_device_group_size;
+                std::size_t const ngroups = (std::size_t(Gpu::range_detail::num_rows(n)) + G - 1) / G;
+                q.submit([&] (sycl::handler& h) {
+                    h.parallel_for(sycl::nd_range<1>(sycl::range<1>(ngroups*G),
+                                                     sycl::range<1>(G)),
+                    [=] (sycl::nd_item<1> item)
+                    {
+                        for (auto const b : Gpu::RowRange(n,item.get_global_id(0),item.get_global_range(0))) {
+                            if constexpr (detail::is_big_kernel<L>()) {
+                                (*pf)(b);
+                            } else {
+                                f(b);
+                            }
+                        }
+                    });
+                });
+                return;
+            }
+        }
+#endif
         q.submit([&] (sycl::handler& h) {
             h.parallel_for(sycl::nd_range<1>(sycl::range<1>(nthreads_total),
                                              sycl::range<1>(nthreads_per_block)),

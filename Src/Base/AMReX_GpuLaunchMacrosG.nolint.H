@@ -1,6 +1,93 @@
 // Do not include this header anywhere other than AMReX_GpuLaunchMacrosG.H.
 // The purpose of this file is to avoid clang-tidy.
 
+// SYCL CPU device (AdaptiveCpp): box ranges give each work-item whole x-rows
+// (Gpu::RowRange) in small work-groups, one group per OpenMP thread at a
+// time, so that the block's loops over its box run contiguously and small
+// boxes still spread over all threads. Each expands to "if (...) {...} else"
+// in front of the GPU-layout submission; integer ranges keep that layout.
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+#define AMREX_I_SYCL_CPU_ROWS(TN,TI,block) \
+    if (amrex::Gpu::Device::isCpuDevice() && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN)>>) { \
+        constexpr std::size_t amrex_i_G = amrex::Gpu::Device::cpu_device_group_size; \
+        std::size_t const amrex_i_ngroups = \
+            (std::size_t(amrex::Gpu::range_detail::num_rows(TN)) + amrex_i_G - 1) / amrex_i_G; \
+        amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
+            amrex_i_h.parallel_for(sycl::nd_range<1>(sycl::range<1>(amrex_i_ngroups*amrex_i_G), \
+                                                     sycl::range<1>(amrex_i_G)), \
+            [=] (sycl::nd_item<1> amrex_i_item) \
+            { \
+                for (auto const TI : amrex::Gpu::RowRange(TN,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                    block \
+                } \
+            }); \
+        }); \
+    } else
+
+#define AMREX_I_SYCL_CPU_ROWS_2(TN1,TI1,block1,TN2,TI2,block2) \
+    if (amrex::Gpu::Device::isCpuDevice() && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN1)>> && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN2)>>) { \
+        constexpr std::size_t amrex_i_G = amrex::Gpu::Device::cpu_device_group_size; \
+        std::size_t const amrex_i_ngroups = \
+            (std::size_t(amrex::max(amrex::Gpu::range_detail::num_rows(TN1), \
+                                    amrex::Gpu::range_detail::num_rows(TN2))) + amrex_i_G - 1) / amrex_i_G; \
+        amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
+            amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_ngroups*amrex_i_G,2), \
+                                                     sycl::range<2>(amrex_i_G,1)), \
+            [=] (sycl::nd_item<2> amrex_i_item) \
+            { \
+                switch (amrex_i_item.get_group(1)) { \
+                case 0: for (auto const TI1 : amrex::Gpu::RowRange(TN1,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                            block1 \
+                        } \
+                        break; \
+                case 1: for (auto const TI2 : amrex::Gpu::RowRange(TN2,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                            block2 \
+                        } \
+                } \
+            }); \
+        }); \
+    } else
+
+#define AMREX_I_SYCL_CPU_ROWS_3(TN1,TI1,block1,TN2,TI2,block2,TN3,TI3,block3) \
+    if (amrex::Gpu::Device::isCpuDevice() && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN1)>> && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN2)>> && \
+        amrex::Gpu::range_detail::is_box_v<std::decay_t<decltype(TN3)>>) { \
+        constexpr std::size_t amrex_i_G = amrex::Gpu::Device::cpu_device_group_size; \
+        std::size_t const amrex_i_ngroups = \
+            (std::size_t(amrex::max(amrex::Gpu::range_detail::num_rows(TN1), \
+                                    amrex::Gpu::range_detail::num_rows(TN2), \
+                                    amrex::Gpu::range_detail::num_rows(TN3))) + amrex_i_G - 1) / amrex_i_G; \
+        amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
+            amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_ngroups*amrex_i_G,3), \
+                                                     sycl::range<2>(amrex_i_G,1)), \
+            [=] (sycl::nd_item<2> amrex_i_item) \
+            { \
+                switch (amrex_i_item.get_group(1)) { \
+                case 0: for (auto const TI1 : amrex::Gpu::RowRange(TN1,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                            block1 \
+                        } \
+                        break; \
+                case 1: for (auto const TI2 : amrex::Gpu::RowRange(TN2,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                            block2 \
+                        } \
+                        break; \
+                case 2: for (auto const TI3 : amrex::Gpu::RowRange(TN3,amrex_i_item.get_global_id(0),amrex_i_item.get_global_range(0))) { \
+                            block3 \
+                        } \
+                } \
+            }); \
+        }); \
+    } else
+#else
+#define AMREX_I_SYCL_CPU_ROWS(TN,TI,block)
+#define AMREX_I_SYCL_CPU_ROWS_2(TN1,TI1,block1,TN2,TI2,block2)
+#define AMREX_I_SYCL_CPU_ROWS_3(TN1,TI1,block1,TN2,TI2,block2,TN3,TI3,block3)
+#endif
+
 #ifdef AMREX_USE_SYCL
 #define AMREX_GPU_LAUNCH_HOST_DEVICE_LAMBDA_RANGE(TN,TI,block) \
     { auto const& amrex_i_tn = TN; \
@@ -12,6 +99,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_ec.numBlocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS(amrex_i_tn,TI,block) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<1>(sycl::range<1>(amrex_i_nthreads_total), \
                                                          sycl::range<1>(amrex_i_nthreads_per_block)), \
@@ -77,6 +165,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_nblocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS_2(amrex_i_tn1,TI1,block1,amrex_i_tn2,TI2,block2) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_nthreads_total,2), \
                                                          sycl::range<2>(amrex_i_nthreads_per_block,1)), \
@@ -165,6 +254,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_nblocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS_3(amrex_i_tn1,TI1,block1,amrex_i_tn2,TI2,block2,amrex_i_tn3,TI3,block3) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_nthreads_total,3), \
                                                          sycl::range<2>(amrex_i_nthreads_per_block,1)), \
@@ -262,6 +352,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_ec.numBlocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS(amrex_i_tn,TI,block) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<1>(sycl::range<1>(amrex_i_nthreads_total), \
                                                          sycl::range<1>(amrex_i_nthreads_per_block)), \
@@ -317,6 +408,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_nblocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS_2(amrex_i_tn1,TI1,block1,amrex_i_tn2,TI2,block2) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_nthreads_total,2), \
                                                          sycl::range<2>(amrex_i_nthreads_per_block,1)), \
@@ -389,6 +481,7 @@
         int amrex_i_nthreads_total = amrex_i_nthreads_per_block * amrex_i_nblocks.x; \
         auto& amrex_i_q = amrex::Gpu::Device::streamQueue(); \
         try { \
+            AMREX_I_SYCL_CPU_ROWS_3(amrex_i_tn1,TI1,block1,amrex_i_tn2,TI2,block2,amrex_i_tn3,TI3,block3) \
             amrex_i_q.submit([&] (sycl::handler& amrex_i_h) { \
                 amrex_i_h.parallel_for(sycl::nd_range<2>(sycl::range<2>(amrex_i_nthreads_total,3), \
                                                          sycl::range<2>(amrex_i_nthreads_per_block,1)), \

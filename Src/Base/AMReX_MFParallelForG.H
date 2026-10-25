@@ -224,6 +224,41 @@ ParallelForStrided_doit (MF const& mf, IntVect const& stride, IntVect const& off
     const int nblocks = nblocks_per_box * nboxes;
     const BoxIndexer* dp_boxes = parforinfo.getBoxes();
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    if (Gpu::Device::isCpuDevice()) {
+        // One x-row of the strided lattice per work-item, as in
+        // ParallelFor_doit.
+        const int nrows_per_box = parforinfo.getNRowsPerBox();
+        const Long nunits_long = Long(nrows_per_box)*Long(nboxes);
+        AMREX_ASSERT(nunits_long < Long(std::numeric_limits<int>::max()));
+        const int nunits = int(nunits_long);
+        constexpr int G = Gpu::Device::cpu_device_group_size;
+        amrex::launch<G>(int((nunits_long+G-1)/G), Gpu::gpuStream(),
+            [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+            {
+                const int unit = int(item.get_global_id(0));
+                if (unit >= nunits) { return; }
+                const int ibox = unit / nrows_per_box;
+                const int row = unit - ibox*nrows_per_box;
+                BoxIndexer const indexer = dp_boxes[ibox];
+                const int lenx = box_indexer_len_x(indexer);
+                const auto icell0 = std::uint64_t(row)*std::uint64_t(lenx);
+                if (icell0 < indexer.numPts()) {
+                    IntVect iv = indexer.intVect(icell0);
+                    for (int idim = 1; idim < AMREX_SPACEDIM; ++idim) {
+                        iv[idim] = indexer.lo[idim] + (iv[idim]-indexer.lo[idim])*stride[idim];
+                    }
+                    auto const d3 = iv.dim3();
+                    for (int ic = 0; ic < lenx; ++ic) {
+                        f(ibox, indexer.lo[0] + ic*stride[0], d3.y, d3.z);
+                    }
+                }
+            });
+        AMREX_GPU_ERROR_CHECK();
+        return;
+    }
+#endif
+
 #if defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
 
     amrex::launch_global<MT>
@@ -271,6 +306,42 @@ ParallelForRedBlack_doit (MF const& mf, int redblack, F const& f)
     AMREX_ASSERT(Long(nblocks_per_box)*Long(nboxes) < Long(std::numeric_limits<int>::max()));
     const int nblocks = nblocks_per_box * nboxes;
     const BoxIndexer* dp_boxes = parforinfo.getBoxes();
+
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    if (Gpu::Device::isCpuDevice()) {
+        // One (j,k) row per work-item: the points of the row's colour are
+        // every other i, taken from the lattice of that parity.
+        const int nrows_per_box = parforinfo.getNRowsPerBox();
+        const Long nunits_long = Long(nrows_per_box)*Long(nboxes);
+        AMREX_ASSERT(nunits_long < Long(std::numeric_limits<int>::max()));
+        const int nunits = int(nunits_long);
+        constexpr int G = Gpu::Device::cpu_device_group_size;
+        amrex::launch<G>(int((nunits_long+G-1)/G), Gpu::gpuStream(),
+            [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+            {
+                const int unit = int(item.get_global_id(0));
+                if (unit >= nunits) { return; }
+                const int ibox = unit / nrows_per_box;
+                const int row = unit - ibox*nrows_per_box;
+                BoxIndexer const* indexers = dp_boxes + 2*ibox;
+                const int big = (indexers[1].numPts() > indexers[0].numPts()) ? 1 : 0;
+                BoxIndexer const indexer_big = indexers[big];
+                const auto icell0 = std::uint64_t(row)*std::uint64_t(box_indexer_len_x(indexer_big));
+                if (icell0 < indexer_big.numPts()) {
+                    auto const d3 = indexer_big.intVect(icell0).dim3();
+                    const int parity = (d3.y + d3.z + redblack) & 1;
+                    BoxIndexer const indexer = indexers[parity];
+                    const int lenx = box_indexer_len_x(indexer);
+                    const int ilo = indexer.lo[0];
+                    for (int ic = 0; ic < lenx; ++ic) {
+                        f(ibox, ilo + 2*ic, d3.y, d3.z);
+                    }
+                }
+            });
+        AMREX_GPU_ERROR_CHECK();
+        return;
+    }
+#endif
 
 #if defined(AMREX_USE_CUDA) || defined(AMREX_USE_HIP)
 
