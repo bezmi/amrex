@@ -191,18 +191,18 @@ if (AMReX_SYCL)
 endif ()
 
 cmake_dependent_option( AMReX_SYCL_AOT  "Enable SYCL ahead-of-time compilation (WIP)"  OFF
-   "AMReX_GPU_BACKEND STREQUAL SYCL" OFF)
+   "AMReX_GPU_BACKEND STREQUAL SYCL;NOT AMReX_SYCL_ACPP" OFF)
 print_option( AMReX_SYCL_AOT )
 
 cmake_dependent_option( AMReX_SYCL_SPLIT_KERNEL "Enable SYCL kernel splitting"  ON
-   "AMReX_GPU_BACKEND STREQUAL SYCL" OFF)
+   "AMReX_GPU_BACKEND STREQUAL SYCL;NOT AMReX_SYCL_ACPP" OFF)
 print_option(  AMReX_SYCL_SPLIT_KERNEL )
 
 cmake_dependent_option( AMReX_SYCL_ONEDPL "Enable Intel's oneDPL algorithms"  OFF
-   "AMReX_GPU_BACKEND STREQUAL SYCL" OFF)
+   "AMReX_GPU_BACKEND STREQUAL SYCL;NOT AMReX_SYCL_ACPP" OFF)
 print_option(  AMReX_SYCL_ONEDPL )
 
-if (AMReX_SYCL)
+if (AMReX_SYCL AND NOT AMReX_SYCL_ACPP)
    set(AMReX_INTEL_ARCH_DEFAULT "IGNORE")
    if (DEFINED ENV{AMREX_INTEL_ARCH})
       set(AMReX_INTEL_ARCH_DEFAULT "$ENV{AMREX_INTEL_ARCH}")
