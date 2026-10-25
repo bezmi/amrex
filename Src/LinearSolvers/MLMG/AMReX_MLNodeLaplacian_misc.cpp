@@ -13,6 +13,34 @@
 
 namespace amrex {
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+namespace {
+    // SYCL CPU device: Fsmooth runs the CPU build's smoother, f(box_no, bx)
+    // sweeping valid box bx lexicographically, with one work-group of one
+    // work-item per box, so that each box is swept by one OpenMP thread as
+    // in the CPU build. The GPU form (8 colours, ParallelForStrided) costs
+    // one more V-cycle and eight strided passes per sweep on this device.
+    template <typename F>
+    void nodal_smooth_cpu_device (MultiFab const& sol, F const& f)
+    {
+        const int nboxes = sol.local_size();
+        if (nboxes == 0) { return; }
+        const IntVect ng = sol.nGrowVect();
+        const IndexType ixt = sol.ixType();
+        auto const& solarr_ma = sol.const_arrays();
+        amrex::launch<1>(nboxes, Gpu::gpuStream(),
+        [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+        {
+            const int box_no = int(item.get_group_linear_id());
+            // The fab of a FabArray is its valid box grown by nGrowVect().
+            const Box fbx(solarr_ma[box_no]);
+            f(box_no, Box(fbx.smallEnd()+ng, fbx.bigEnd()-ng, ixt));
+        });
+        AMREX_GPU_ERROR_CHECK();
+    }
+}
+#endif
+
 void
 MLNodeLaplacian::averageDownCoeffs ()
 {
@@ -393,6 +421,19 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
             if (Gpu::inLaunchRegion())
             {
                 auto const& starr_ma = stencil->const_arrays();
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+                if (Gpu::Device::isCpuDevice()) {
+                    const int nsweeps = m_smooth_num_sweeps;
+                    nodal_smooth_cpu_device(sol,
+                    [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
+                    {
+                        for (int ns = 0; ns < nsweeps; ++ns) {
+                            mlndlap_gauss_seidel_sten(bx,solarr_ma[box_no],rhsarr_ma[box_no],
+                                                      starr_ma[box_no],dmskarr_ma[box_no]);
+                        }
+                    });
+                } else
+#endif
                 for (int color = 0; color < AMREX_D_TERM(2,*2,*2); ++color)
                 {
                     ParallelForStrided(sol, IntVect(2), multicolor_offset(color),
@@ -427,6 +468,23 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
             Real const_sigma = m_const_sigma;
 #ifdef AMREX_USE_GPU
             if (Gpu::inLaunchRegion()) {
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+                if (Gpu::Device::isCpuDevice()) {
+                    const int nsweeps = m_smooth_num_sweeps;
+                    nodal_smooth_cpu_device(sol,
+                    [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
+                    {
+                        for (int ns = 0; ns < nsweeps; ++ns) {
+                            mlndlap_gauss_seidel_c(bx, solarr_ma[box_no], rhsarr_ma[box_no],
+                                                   const_sigma, dmskarr_ma[box_no], dxinvarr
+#if (AMREX_SPACEDIM == 2)
+                                                   ,is_rz
+#endif
+                                );
+                        }
+                    });
+                } else
+#endif
                 for (int color = 0; color < AMREX_D_TERM(2,*2,*2); ++color)
                 {
                     ParallelForStrided(sol, IntVect(2), multicolor_offset(color),
@@ -472,6 +530,24 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
                 AMREX_D_TERM(MultiArray4<Real const> const& sxarr_ma = sigma[0]->const_arrays();,
                              MultiArray4<Real const> const& syarr_ma = sigma[1]->const_arrays();,
                              MultiArray4<Real const> const& szarr_ma = sigma[2]->const_arrays(););
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+                if (Gpu::Device::isCpuDevice()) {
+                    const int nsweeps = m_smooth_num_sweeps;
+                    nodal_smooth_cpu_device(sol,
+                    [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
+                    {
+                        for (int ns = 0; ns < nsweeps; ++ns) {
+                            mlndlap_gauss_seidel_ha(bx, solarr_ma[box_no], rhsarr_ma[box_no],
+                                                    AMREX_D_DECL(sxarr_ma[box_no],syarr_ma[box_no],szarr_ma[box_no]),
+                                                    dmskarr_ma[box_no], dxinvarr
+#if (AMREX_SPACEDIM == 2)
+                                                    ,is_rz
+#endif
+                                );
+                        }
+                    });
+                } else
+#endif
                 for (int color = 0; color < AMREX_D_TERM(2,*2,*2); ++color)
                 {
                     ParallelForStrided(sol, IntVect(2), multicolor_offset(color),
@@ -521,6 +597,23 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
             if (Gpu::inLaunchRegion())
             {
                 auto const& sarr_ma = sigma[0]->const_arrays();
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+                if (Gpu::Device::isCpuDevice()) {
+                    const int nsweeps = m_smooth_num_sweeps;
+                    nodal_smooth_cpu_device(sol,
+                    [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
+                    {
+                        for (int ns = 0; ns < nsweeps; ++ns) {
+                            mlndlap_gauss_seidel_aa(bx, solarr_ma[box_no], rhsarr_ma[box_no],
+                                                    sarr_ma[box_no], dmskarr_ma[box_no], dxinvarr
+#if (AMREX_SPACEDIM == 2)
+                                                    ,is_rz
+#endif
+                                );
+                        }
+                    });
+                } else
+#endif
                 for (int color = 0; color < AMREX_D_TERM(2,*2,*2); ++color)
                 {
                     ParallelForStrided(sol, IntVect(2), multicolor_offset(color),
