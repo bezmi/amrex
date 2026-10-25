@@ -303,7 +303,10 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 std::pair<double,double> sincos (double x)
 {
     std::pair<double,double> r;
-#if defined(AMREX_USE_SYCL)
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // AdaptiveCpp takes a plain pointer; its legacy private_ptr is deprecated.
+    r.first = sycl::sincos(x, &r.second);
+#elif defined(AMREX_USE_SYCL)
     r.first = sycl::sincos(x, sycl::private_ptr<double>(&r.second));
 #else
     AMREX_IF_ON_DEVICE(( ::sincos(x, &r.first, &r.second); ))
@@ -317,7 +320,10 @@ AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 std::pair<float,float> sincos (float x)
 {
     std::pair<float,float> r;
-#if defined(AMREX_USE_SYCL)
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // AdaptiveCpp takes a plain pointer; its legacy private_ptr is deprecated.
+    r.first = sycl::sincos(x, &r.second);
+#elif defined(AMREX_USE_SYCL)
     r.first = sycl::sincos(x, sycl::private_ptr<float>(&r.second));
 #else
     AMREX_IF_ON_DEVICE(( ::sincosf(x, &r.first, &r.second); ))
