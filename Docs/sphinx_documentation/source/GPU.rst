@@ -576,6 +576,13 @@ supported. Plain operations need the program to be linked through the
 ``AMReX::SYCL`` CMake target, which exports the function that kernels query;
 other programs keep the atomics.
 
+On the CPU device, the Gauss-Seidel smoother of ``MLNodeLaplacian`` does
+the number of sweeps set by ``setSmoothNumSweeps`` (default 2) in each
+smoothing step, as in a CPU-only build. On a GPU it does one sweep. A nodal
+solve can therefore take a different number of iterations on the CPU
+device than on a GPU: a nodal Poisson test on a 128x128x128 grid took 8
+iterations instead of 9.
+
 .. ===================================================================
 
 .. _sec:gpu:namespace:
