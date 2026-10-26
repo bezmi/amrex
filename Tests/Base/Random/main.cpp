@@ -4,41 +4,28 @@
 #include <AMReX_Random.H>
 
 #include <cmath>
-#include <cstdint>
 #include <limits>
-#include <random>
 
 using namespace amrex;
 
 namespace {
 
-// A URBG pinned to its maximum output: the input that drives
-// std::uniform_real_distribution hardest towards its excluded upper bound.
-// LWG 2524 notes that std::generate_canonical may return exactly 1.0, because
-// the quotient it forms can round up. Every standard library AMReX currently
-// supports clamps instead (MSVC since it implemented P0952R2 in VS 2022
-// 17.12), so on those this returns the largest value below one rather than one
-// itself -- but nothing in the standard AMReX targets requires that, which is
-// why Random() does not depend on it.
-struct MaxEngine
-{
-    using result_type = std::uint32_t;
-    static constexpr result_type min () { return 0; }
-    static constexpr result_type max () { return std::numeric_limits<std::uint32_t>::max(); }
-    result_type operator() () { return max(); }
-};
-
 // The interval conversions that amrex::Random and amrex::RandomPositive apply
 // to a raw draw must hold the documented intervals for every input, including
 // the endpoints. These checks are deterministic: the endpoints are far too
 // rare to reach by sampling, so they are fed in directly.
+//
+// The hardest raw draw is exactly 1.0. LWG 2524 notes that
+// std::generate_canonical may return it, and what a standard library does
+// with that case differs (clamp, or retry: libstdc++ 16 loops until a draw
+// below one, which never happens for a generator pinned at its maximum), so
+// the value is fed to the guard directly rather than drawn through
+// std::uniform_real_distribution.
 void test_endpoint_guard ()
 {
     // Whatever the standard library hands back for the hardest input, the
     // guard must leave it inside [0,1).
-    MaxEngine engine;
-    std::uniform_real_distribution<Real> distribution(0.0, 1.0);
-    Real const raw = distribution(engine);
+    Real const raw = Real(1);
     Real const guarded = random_util::clamp_below_one(raw);
     AMREX_ALWAYS_ASSERT(guarded < Real(1));
     AMREX_ALWAYS_ASSERT(guarded >= Real(0));
