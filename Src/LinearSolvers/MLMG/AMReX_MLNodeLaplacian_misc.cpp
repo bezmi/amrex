@@ -15,11 +15,15 @@ namespace amrex {
 
 #if defined(AMREX_USE_SYCL) && defined(__ACPP__)
 namespace {
-    // SYCL CPU device: Fsmooth runs the CPU build's smoother, f(box_no, bx)
-    // sweeping valid box bx lexicographically, with one work-group of one
-    // work-item per box, so that each box is swept by one OpenMP thread as
-    // in the CPU build. The GPU form (8 colours, ParallelForStrided) costs
-    // one more V-cycle and eight strided passes per sweep on this device.
+    // SYCL CPU device: Fsmooth runs f(box_no, bx) on valid box bx with one
+    // work-group of one work-item per box, i.e. one OpenMP thread per box as
+    // in the CPU build. f sweeps the box with LoopMulticolorOnCpu: the same
+    // color order and results as the GPU form's 2^DIM ParallelForStrided
+    // launches per sweep, which on this device stream every box through
+    // memory 2^DIM times per sweep.
+    // f should copy the Array4s it uses into locals before sweeping: read
+    // through a MultiArray4 in device memory, their pointers and strides may
+    // alias the solution and are reloaded at every point (1.5x slower).
     template <typename F>
     void nodal_smooth_cpu_device (MultiFab const& sol, F const& f)
     {
@@ -427,9 +431,16 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
                     nodal_smooth_cpu_device(sol,
                     [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
                     {
+                        // Local copies (see nodal_smooth_cpu_device).
+                        Array4<Real> const solarr = solarr_ma[box_no];
+                        Array4<Real const> const rhsarr = rhsarr_ma[box_no];
+                        Array4<Real const> const starr = starr_ma[box_no];
+                        Array4<int const> const dmskarr = dmskarr_ma[box_no];
                         for (int ns = 0; ns < nsweeps; ++ns) {
-                            mlndlap_gauss_seidel_sten(bx,solarr_ma[box_no],rhsarr_ma[box_no],
-                                                      starr_ma[box_no],dmskarr_ma[box_no]);
+                            LoopMulticolorOnCpu(bx, [&] (int i, int j, int k) noexcept
+                            {
+                                mlndlap_gauss_seidel_sten(i,j,k,solarr,rhsarr,starr,dmskarr);
+                            });
                         }
                     });
                 } else
@@ -474,13 +485,19 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
                     nodal_smooth_cpu_device(sol,
                     [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
                     {
+                        Array4<Real> const solarr = solarr_ma[box_no];
+                        Array4<Real const> const rhsarr = rhsarr_ma[box_no];
+                        Array4<int const> const dmskarr = dmskarr_ma[box_no];
                         for (int ns = 0; ns < nsweeps; ++ns) {
-                            mlndlap_gauss_seidel_c(bx, solarr_ma[box_no], rhsarr_ma[box_no],
-                                                   const_sigma, dmskarr_ma[box_no], dxinvarr
+                            LoopMulticolorOnCpu(bx, [&] (int i, int j, int k) noexcept
+                            {
+                                mlndlap_gscolor_c(i,j,k, solarr, rhsarr,
+                                                  const_sigma, dmskarr, dxinvarr
 #if (AMREX_SPACEDIM == 2)
-                                                   ,is_rz
+                                                  ,is_rz
 #endif
-                                );
+                                    );
+                            });
                         }
                     });
                 } else
@@ -536,14 +553,23 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
                     nodal_smooth_cpu_device(sol,
                     [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
                     {
+                        Array4<Real> const solarr = solarr_ma[box_no];
+                        Array4<Real const> const rhsarr = rhsarr_ma[box_no];
+                        AMREX_D_TERM(Array4<Real const> const sxarr = sxarr_ma[box_no];,
+                                     Array4<Real const> const syarr = syarr_ma[box_no];,
+                                     Array4<Real const> const szarr = szarr_ma[box_no];)
+                        Array4<int const> const dmskarr = dmskarr_ma[box_no];
                         for (int ns = 0; ns < nsweeps; ++ns) {
-                            mlndlap_gauss_seidel_ha(bx, solarr_ma[box_no], rhsarr_ma[box_no],
-                                                    AMREX_D_DECL(sxarr_ma[box_no],syarr_ma[box_no],szarr_ma[box_no]),
-                                                    dmskarr_ma[box_no], dxinvarr
+                            LoopMulticolorOnCpu(bx, [&] (int i, int j, int k) noexcept
+                            {
+                                mlndlap_gscolor_ha(i,j,k, solarr, rhsarr,
+                                                   AMREX_D_DECL(sxarr,syarr,szarr),
+                                                   dmskarr, dxinvarr
 #if (AMREX_SPACEDIM == 2)
-                                                    ,is_rz
+                                                   ,is_rz
 #endif
-                                );
+                                    );
+                            });
                         }
                     });
                 } else
@@ -603,13 +629,20 @@ MLNodeLaplacian::Fsmooth (int amrlev, int mglev, MultiFab& sol, const MultiFab& 
                     nodal_smooth_cpu_device(sol,
                     [=] AMREX_GPU_DEVICE (int box_no, Box const& bx) noexcept
                     {
+                        Array4<Real> const solarr = solarr_ma[box_no];
+                        Array4<Real const> const rhsarr = rhsarr_ma[box_no];
+                        Array4<Real const> const sarr = sarr_ma[box_no];
+                        Array4<int const> const dmskarr = dmskarr_ma[box_no];
                         for (int ns = 0; ns < nsweeps; ++ns) {
-                            mlndlap_gauss_seidel_aa(bx, solarr_ma[box_no], rhsarr_ma[box_no],
-                                                    sarr_ma[box_no], dmskarr_ma[box_no], dxinvarr
+                            LoopMulticolorOnCpu(bx, [&] (int i, int j, int k) noexcept
+                            {
+                                mlndlap_gscolor_aa(i,j,k, solarr, rhsarr,
+                                                   sarr, dmskarr, dxinvarr
 #if (AMREX_SPACEDIM == 2)
-                                                    ,is_rz
+                                                   ,is_rz
 #endif
-                                );
+                                    );
+                            });
                         }
                     });
                 } else

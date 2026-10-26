@@ -473,6 +473,47 @@ ParallelFor (MF const& mf, IntVect const& ng, int ncomp, TileSize const& ts,
 }
 
 /**
+ * \brief One-pass multi-color sweep of a box on the CPU.
+ *
+ * Visits the 2^DIM colors of multicolor_offset in color order and gives
+ * every point the same neighbor values as 2^DIM separate color passes do
+ * (stride 2, stencil reach 1): color c sweeps the plane (row in 2D, point
+ * in 1D) that lags color 0 by c + offset[last] planes in the last
+ * direction, the smallest lag at which colors < c are finished and colors
+ * > c untouched on the neighboring planes (colors of the same parity in
+ * that direction meet only on one plane, so they need a lag of one).  At
+ * most 2^DIM + 1 planes are live, and the box is streamed once per sweep
+ * instead of 2^DIM times.  The caller must own the whole box: neighboring
+ * regions swept concurrently (e.g., OpenMP tiles) would be at different
+ * colors.
+ */
+template <class F>
+void LoopMulticolorOnCpu (Box const& bx, F const& f) noexcept
+{
+    constexpr int ncolors = 1 << AMREX_SPACEDIM;
+    constexpr int last = AMREX_SPACEDIM-1;
+    const IntVect lo = bx.smallEnd(), hi = bx.bigEnd();
+    for (int step = lo[last]; step <= hi[last] + ncolors; ++step) { // largest lag is ncolors
+        for (int color = 0; color < ncolors; ++color) {
+            IntVect const offset = multicolor_offset(color);
+            IntVect clo = lo, chi = hi;
+            clo[last] = chi[last] = step - (color + offset[last]);
+            if (clo[last] < lo[last] || clo[last] > hi[last] ||
+                ((clo[last]-offset[last]) & 1)) { continue; } // not a plane of this color
+            for (int d = 0; d < last; ++d) { clo[d] += (offset[d]-lo[d]) & 1; } // first node of this color
+            const Dim3 l = clo.dim3(0), h = chi.dim3(0);
+            for (        int k = l.z; k <= h.z; k += 2) {
+                for (    int j = l.y; j <= h.y; j += 2) {
+                    for (int i = l.x; i <= h.x; i += 2) {
+                        f(i,j,k);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * \brief ParallelFor over a strided subset of the valid region of a MultiFab/FabArray.
  *
  * Only points whose index in direction d equals offset[d] modulo stride[d]
