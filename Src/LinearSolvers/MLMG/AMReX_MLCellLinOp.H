@@ -1068,6 +1068,45 @@ MLCellLinOpT<MF>::applyBC (int amrlev, int mglev, MF& in, BCMode bc_mode, StateM
         }
 
         auto inma = in.arrays();
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+        if (Gpu::Device::isCpuDevice()) {
+            // SYCL CPU device: the box-form kernels of the CPU build on each
+            // work unit (ParallelForRange). With the per-cell lambda below,
+            // the face and BC-type branches are tested at every cell (1.9x
+            // the time in ABecLaplacian_C).
+            ParallelForRange(m_bc_tags[amrlev][mglev],
+            [=] AMREX_GPU_DEVICE (Box const& tbx, MLMGABCTag<RT> const& tag) noexcept
+            {
+                // Local copy of phi: read through a MultiArray4 in device
+                // memory, it may alias itself and is reloaded at every cell.
+                // bcval stays a reference: without bndry it refers into an
+                // empty MultiArray4 and is only read when flagbc is set.
+                Array4<RT> const phi = inma[tag.local_index];
+                const auto& bcval = bndry_arrays[tag.face][tag.local_index];
+                const int side = tag.face.faceDir();
+                if (tag.face.coordDir() == 0) {
+                    mllinop_apply_bc_x(side, tbx, tag.blen, phi, tag.mask, tag.bctype,
+                                       tag.bcloc, bcval, imaxorder, dxi, flagbc, tag.comp);
+                }
+#if (AMREX_SPACEDIM > 1)
+                else
+#if (AMREX_SPACEDIM > 2)
+                if (tag.face.coordDir() == 1)
+#endif
+                {
+                    mllinop_apply_bc_y(side, tbx, tag.blen, phi, tag.mask, tag.bctype,
+                                       tag.bcloc, bcval, imaxorder, dyi, flagbc, tag.comp);
+                }
+#if (AMREX_SPACEDIM > 2)
+                else {
+                    mllinop_apply_bc_z(side, tbx, tag.blen, phi, tag.mask, tag.bctype,
+                                       tag.bcloc, bcval, imaxorder, dzi, flagbc, tag.comp);
+                }
+#endif
+#endif
+            });
+        } else
+#endif
         ParallelFor(m_bc_tags[amrlev][mglev],
         [=] AMREX_GPU_DEVICE (int i, int j, int k, MLMGABCTag<RT> const& tag) noexcept
         {

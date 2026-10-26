@@ -661,6 +661,38 @@ void ParallelFor (TagVector<TagType> const& tv, F const& f)
         });
 }
 
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+/**
+ * \brief SYCL CPU device only: calls f(tbx, tag) once per work unit of the
+ * box tags, where tbx is the unit's box (x-rows of one k-plane, see
+ * detail::tag_cpu_unit_box). The units cover each tag's box once. Lets a
+ * caller run a box-form kernel, with its loops and branches over a whole
+ * unit, where the per-cell ParallelFor would test them at every cell.
+ */
+template <class TagType, class F>
+requires (std::same_as<std::decay_t<decltype(std::declval<TagType>().box())>, Box>)
+void ParallelForRange (TagVector<TagType> const& tv, F const& f)
+{
+    AMREX_ALWAYS_ASSERT(tv.is_defined() && Gpu::Device::isCpuDevice());
+    if (tv.ntags == 0 || tv.ntotunits == 0) { return; }
+
+    const auto d_tags = tv.d_tags;
+    const auto d_nunits = tv.d_nunits;
+    const auto ntags = tv.ntags;
+    const auto ntotunits = tv.ntotunits;
+
+    amrex::launch<Gpu::Device::cpu_device_group_size>(tv.nblocks, Gpu::gpuStream(),
+    [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
+    {
+        int unit = int(item.get_global_id(0));
+        if (unit >= ntotunits) { return; }
+        int tag_id = amrex::bisect(d_nunits, 0, ntags, unit);
+        TagType const tag = d_tags[tag_id];
+        f(detail::tag_cpu_unit_box(unit - d_nunits[tag_id], tag.box()), tag);
+    });
+}
+#endif
+
 template <class TagType, class F>
 requires (std::is_integral_v<std::decay_t<decltype(std::declval<TagType>().size())> >)
 void ParallelFor (TagVector<TagType> const& tv, F const& f)
