@@ -649,6 +649,17 @@ removeInvalidParticles (PTile& ptile)
     ptile.resize(new_size);
 }
 
+/**
+ * \brief Partition the particles of tile (lev, gid, tid) so that those that
+ * stay come first; returns the number that stay.
+ *
+ * A valid own_gridbox states that lev == lev_max, that grid gid of level
+ * lev is own_gridbox in the current BoxArray, and that tile (gid, tid) is
+ * owned by this process. A particle whose cell is then in own_gridbox (and,
+ * with tiling, in tile tid of it) stays without the locator search, the
+ * outcome the search would give, since the grids of a level do not overlap.
+ * The default empty Box always searches.
+ */
 template <typename PTile, typename PLocator, typename CellAssignor>
 int
 partitionParticlesByDest (PTile& ptile, const PLocator& ploc, CellAssignor const& assignor,
@@ -659,10 +670,12 @@ partitionParticlesByDest (PTile& ptile, const PLocator& ploc, CellAssignor const
                           const GpuArray<ParticleReal,AMREX_SPACEDIM>& rhi,
                           const GpuArray<int ,AMREX_SPACEDIM>& is_per,
                           int lev, int gid, int tid,
-                          int lev_min, int lev_max, IntVect nGrow, bool remove_negative)
+                          int lev_min, int lev_max, IntVect nGrow, bool remove_negative,
+                          const Box& own_gridbox = Box())
 {
     auto getPID = pmap.getPIDFunctor();
     int pid = ParallelContext::MyProcSub();
+    const bool own = own_gridbox.ok();
 
     Gpu::DeviceVector<uint8_t> particle_stays(ptile.numParticles());
     uint8_t * const p_particle_stays = particle_stays.dataPtr();
@@ -687,6 +700,13 @@ partitionParticlesByDest (PTile& ptile, const PLocator& ploc, CellAssignor const
             {
                 auto p_prime = ptd.getSuperParticle(i);
                 enforcePeriodic(p_prime, plo, phi, rlo, rhi, is_per);
+                if (own && ploc.inGridTile(p_prime, lev, own_gridbox, tid, assignor)) {
+                    AMREX_D_TERM(ptd.pos(0, i) = p_prime.pos(0);,
+                                 ptd.pos(1, i) = p_prime.pos(1);,
+                                 ptd.pos(2, i) = p_prime.pos(2););
+                    p_particle_stays[i] = 1;
+                    return;
+                }
                 auto tup_prime = ploc(p_prime, lev_min, lev_max, nGrow, assignor);
                 assigned_grid = amrex::get<0>(tup_prime);
                 assigned_tile = amrex::get<1>(tup_prime);

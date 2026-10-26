@@ -59,6 +59,18 @@ struct AssignGrid
         return getTileIndex(iv, bx, m_do_tiling, tile_size, tbx);
     }
 
+    //! True if the particle's cell is in gridbox and, with tiling, in tile
+    //! tid of it: the answer operator() gives for that grid, without
+    //! searching the bins.
+    template <typename P, typename Assignor = DefaultAssignor>
+    [[nodiscard]] AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    bool inGridTile (const P& p, const Box& gridbox, int tid,
+                     Assignor const& assignor = Assignor{}) const noexcept
+    {
+        const auto iv = assignor(p, m_plo, m_dxi, m_domain);
+        return gridbox.contains(iv) && (!m_do_tiling || getTile(iv, gridbox) == tid);
+    }
+
     template <typename P, typename Assignor = DefaultAssignor>
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     std::pair<int, int> operator() (const P& p, int nGrow, Assignor const& assignor = Assignor{}) const noexcept
@@ -296,6 +308,15 @@ struct AmrAssignGrid
         }
 
         return makeTuple(-1, -1, -1);
+    }
+
+    //! AssignGrid::inGridTile on level lev.
+    template <typename P, typename Assignor = DefaultAssignor>
+    [[nodiscard]] AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    bool inGridTile (const P& p, int lev, const Box& gridbox, int tid,
+                     Assignor const& assignor = {}) const noexcept
+    {
+        return m_funcs[lev].inGridTile(p, gridbox, tid, assignor);
     }
 };
 

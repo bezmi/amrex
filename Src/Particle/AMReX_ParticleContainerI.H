@@ -1595,11 +1595,19 @@ ParticleContainer_impl<ParticleType, NArrayReal, NArrayInt, Allocator, CellAssig
                                                     boxes, levels, tiles,
                                                     src_indices, periodic_shift);
 #else // GPU algorithm
+        // Particles still in this tile skip the locator search when the tile
+        // is on the finest level considered, exists in the current BoxArray
+        // (after a regrid the keys can be old indices) and is owned here.
+        const BoxArray& pba = this->ParticleBoxArray(lev);
+        const bool own_tile = (lev == lev_max) && (gid < pba.size())
+            && (tid < numTilesInBox(pba[gid], do_tiling, tile_size))
+            && (BufferMap().procID(gid, tid, lev) == ParallelContext::MyProcSub());
         int num_stay = partitionParticlesByDest(src_tile, assign_grid,
                                                 std::forward<CellAssignor>(CellAssignor{}),
                                                 BufferMap(),
                                                 plo, phi, rlo, rhi, is_per, lev, gid, tid,
-                                                lev_min, lev_max, nGrow, remove_negative);
+                                                lev_min, lev_max, nGrow, remove_negative,
+                                                own_tile ? pba[gid] : Box());
 
         int num_move = np - num_stay;
         *new_size_ptrs[pmap_it] = num_stay;
