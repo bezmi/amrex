@@ -149,15 +149,47 @@ namespace detail {
     requires (std::is_integral_v<std::decay_t<decltype(std::declval<T>().size())> >)
     constexpr bool is_box_tag (T const&) { return false; }
 
-#ifdef AMREX_USE_GPU
-    // Elements per work unit for vector tags on a SYCL CPU device.
+#if defined(AMREX_USE_SYCL) && defined(__ACPP__)
+    // Cells (box tags) or elements (vector tags) per work unit on a SYCL
+    // CPU device.
     constexpr int tag_cpu_chunk_size = 256;
 
+    // x-rows per work unit of a box tag with lengths len_x, len_y on a SYCL
+    // CPU device: about tag_cpu_chunk_size cells, at least one row and at
+    // most one k-plane, so that a unit is a box. A box one cell wide in x
+    // (e.g. an x-face) then pays the per-unit tag lookup once per unit
+    // instead of once per cell.
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    int tag_cpu_rows_per_unit (int len_x, int len_y) noexcept
+    {
+        return amrex::min(len_y, amrex::max(1, tag_cpu_chunk_size/len_x));
+    }
+
+    // Cells of unit `unit` of a box tag with box bx on a SYCL CPU device:
+    // rows [j0,j1) of one k-plane.
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    Box tag_cpu_unit_box (int unit, Box const& bx) noexcept
+    {
+        const auto len = amrex::length(bx);
+        const auto lo  = amrex::lbound(bx);
+        const int rows = tag_cpu_rows_per_unit(len.x, len.y);
+        const int nju = (len.y + rows - 1) / rows;
+        const int k = unit / nju;
+        const int j0 = (unit - k*nju) * rows;
+        const int j1 = amrex::min(j0+rows, len.y);
+        return Box(IntVect(AMREX_D_DECL(lo.x, lo.y+j0, lo.z+k)),
+                   IntVect(AMREX_D_DECL(lo.x+len.x-1, lo.y+j1-1, lo.z+k)),
+                   bx.ixType());
+    }
+#endif
+
+#ifdef AMREX_USE_GPU
     // A tag is split into work units. On GPUs a unit is one warp of cells,
     // one cell per thread. On a SYCL CPU device (AdaptiveCpp's OpenMP
-    // backend) a work-item is one scalar loop iteration, so a unit is one
-    // x-row of a box tag, or tag_cpu_chunk_size consecutive elements of a
-    // vector tag, and the work-item loops over the unit's cells.
+    // backend) a work-item is one scalar loop iteration, so a unit is the
+    // box tag_cpu_unit_box of a box tag, or tag_cpu_chunk_size consecutive
+    // elements of a vector tag, and the work-item loops over the unit's
+    // cells.
     template <typename T>
     Long get_tag_nunits (T const& tag) noexcept
     {
@@ -165,7 +197,9 @@ namespace detail {
         if (Gpu::Device::isCpuDevice()) {
             if constexpr (is_box_tag(T{})) {
                 auto const len = amrex::length(tag.box());
-                return (len.x > 0) ? tag.box().numPts() / len.x : Long(0);
+                if (len.x <= 0 || len.y <= 0) { return Long(0); }
+                Long const rows = tag_cpu_rows_per_unit(len.x, len.y);
+                return Long(len.z) * ((len.y + rows - 1) / rows);
             } else {
                 return (get_tag_size(tag) + tag_cpu_chunk_size - 1) / tag_cpu_chunk_size;
             }
@@ -365,23 +399,26 @@ void tagparfor_call_f (int i, T const& tag, F&& f) noexcept
 
 #if defined(AMREX_USE_SYCL) && defined(__ACPP__)
 // SYCL CPU device: one work-item handles a whole unit (see get_tag_nunits).
-// Box tag: unit `row` is the x-row (j,k) of the tag box; f is called for
-// each cell with the same (icell, ncells, i, j, k, tag) arguments as on GPUs.
+// Box tag: unit `unit` is the box tag_cpu_unit_box (x-rows of one k-plane);
+// f is called for each cell with the same (icell, ncells, i, j, k, tag)
+// arguments as on GPUs.
 template <typename T, typename F>
 requires (std::same_as<std::decay_t<decltype(std::declval<T>().box())>, Box>)
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void tagparfor_call_unit (int row, T const& tag, F&& f) noexcept
+void tagparfor_call_unit (int unit, T const& tag, F&& f) noexcept
 {
     int ncells = tag.box().numPts();
     const auto len = amrex::length(tag.box());
     const auto lo  = amrex::lbound(tag.box());
-    int k = row / len.y;
-    int j = row - k*len.y;
-    int icell = row*len.x;
-    j += lo.y;
-    k += lo.z;
-    for (int i = 0; i < len.x; ++i) {
-        f(icell+i, ncells, lo.x+i, j, k, tag);
+    const auto ub  = tag_cpu_unit_box(unit, tag.box());
+    const auto ulo = amrex::lbound(ub);
+    const auto uhi = amrex::ubound(ub);
+    const int k = ulo.z;
+    for (int j = ulo.y; j <= uhi.y; ++j) {
+        int icell = ((k-lo.z)*len.y + (j-lo.y))*len.x;
+        for (int i = 0; i < len.x; ++i) {
+            f(icell+i, ncells, lo.x+i, j, k, tag);
+        }
     }
 }
 
@@ -391,19 +428,21 @@ void tagparfor_call_unit (int row, T const& tag, F&& f) noexcept
 template <typename T, typename F>
 requires (std::same_as<std::decay_t<decltype(std::declval<T>().box())>, Box>)
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void tagparfor_call_unit (int row, int ncomp, T const& tag, F&& f) noexcept
+void tagparfor_call_unit (int unit, int ncomp, T const& tag, F&& f) noexcept
 {
     int ncells = tag.box().numPts();
     const auto len = amrex::length(tag.box());
     const auto lo  = amrex::lbound(tag.box());
-    int k = row / len.y;
-    int j = row - k*len.y;
-    int icell = row*len.x;
-    j += lo.y;
-    k += lo.z;
+    const auto ub  = tag_cpu_unit_box(unit, tag.box());
+    const auto ulo = amrex::lbound(ub);
+    const auto uhi = amrex::ubound(ub);
+    const int k = ulo.z;
     for (int n = 0; n < ncomp; ++n) {
-        for (int i = 0; i < len.x; ++i) {
-            f(icell+i, ncells, lo.x+i, j, k, n, tag);
+        for (int j = ulo.y; j <= uhi.y; ++j) {
+            int icell = ((k-lo.z)*len.y + (j-lo.y))*len.x;
+            for (int i = 0; i < len.x; ++i) {
+                f(icell+i, ncells, lo.x+i, j, k, n, tag);
+            }
         }
     }
 }
@@ -439,7 +478,7 @@ ParallelFor_doit (TagVector<TagType> const& tv, F const& f)
 
 #if defined(AMREX_USE_SYCL) && defined(__ACPP__)
     if (Gpu::Device::isCpuDevice()) {
-        // One unit (x-row or chunk) per work-item in small groups; the
+        // One unit (rows or chunk) per work-item in small groups; the
         // TagVector was defined with the matching unit layout.
         amrex::launch<Gpu::Device::cpu_device_group_size>(tv.nblocks, Gpu::gpuStream(),
         [=] AMREX_GPU_DEVICE (sycl::nd_item<1> const& item) noexcept
