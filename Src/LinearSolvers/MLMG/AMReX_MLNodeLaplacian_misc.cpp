@@ -17,10 +17,11 @@ namespace amrex {
 namespace {
     // SYCL CPU device: Fsmooth runs f(box_no, bx) on valid box bx with one
     // work-group of one work-item per box, i.e. one OpenMP thread per box as
-    // in the CPU build. f sweeps the box with LoopMulticolorOnCpu: the same
-    // color order and results as the GPU form's 2^DIM ParallelForStrided
-    // launches per sweep, which on this device stream every box through
-    // memory 2^DIM times per sweep.
+    // in the CPU build. f sweeps the box with LoopMulticolorOnCpu: per sweep,
+    // the same color order and results as the GPU form's 2^DIM
+    // ParallelForStrided launches, which on this device stream every box
+    // through memory 2^DIM times per sweep. As in the CPU build, f does
+    // m_smooth_num_sweeps sweeps; the GPU form does one.
     // f should copy the Array4s it uses into locals before sweeping: read
     // through a MultiArray4 in device memory, their pointers and strides may
     // alias the solution and are reloaded at every point (1.5x slower).

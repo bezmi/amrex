@@ -55,8 +55,9 @@ public:
      * \brief Control how many smoother passes are executed inside
      * each Fsmooth call.
      *
-     * Used only by the host Gauss-Seidel sweeps of MLNodeLaplacian and
-     * MLNodeABecLaplacian; ignored elsewhere.
+     * Used by the host Gauss-Seidel sweeps of MLNodeLaplacian and
+     * MLNodeABecLaplacian, and by MLNodeLaplacian on the AdaptiveCpp CPU
+     * device; ignored elsewhere.
      *
      * \param nsweeps Number of smoothing sweeps per Fsmooth invocation.
      */
