@@ -833,7 +833,11 @@ Device::initialize_gpu (bool minimal)
         device_prop.maxGridSize[2] = -1; // unknown
         device_prop.warpSize = warp_size;
         auto sgss = d.get_info<sycl::info::device::sub_group_sizes>();
-        device_prop.maxMemAllocSize = d.get_info<sycl::info::device::max_mem_alloc_size>();
+        // Some devices report no limit as the largest unsigned value (e.g.,
+        // AdaptiveCpp's CPU device). Clamp it so that it stays positive in Long.
+        auto max_alloc = d.get_info<sycl::info::device::max_mem_alloc_size>();
+        max_alloc = std::min(max_alloc, static_cast<decltype(max_alloc)>(std::numeric_limits<Long>::max()));
+        device_prop.maxMemAllocSize = static_cast<Long>(max_alloc);
         device_prop.managedMemory = d.has(sycl::aspect::usm_host_allocations);
         device_prop.concurrentManagedAccess = d.has(sycl::aspect::usm_shared_allocations);
         device_prop.maxParameterSize = d.get_info<sycl::info::device::max_parameter_size>();
